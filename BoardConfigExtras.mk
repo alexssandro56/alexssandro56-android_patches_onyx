@@ -7,3 +7,4 @@
 #
 
 BOARD_VENDOR_SEPOLICY_DIRS += vendor/onyx-extras/mithermald/sepolicy/vendor
+SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += vendor/onyx-extras/gamespace/sepolicy/private

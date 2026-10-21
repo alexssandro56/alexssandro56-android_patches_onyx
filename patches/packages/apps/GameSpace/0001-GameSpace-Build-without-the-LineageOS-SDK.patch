@@ -1,32 +1,34 @@
-From 632da2047fb922a201680739e08f15a8dc16d9d9 Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Wed, 21 Oct 2026 23:18:51 +0000
+From 03b4a23dfe14356ff253a8319a24ede64c6e5a3c Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:35:17 +0000
 Subject: [PATCH] GameSpace: Build without the LineageOS SDK
 
-AOSPA doesn't ship lineage-sdk:
-- drop org.lineageos.platform.internal and LineagePreferenceLib
-- the three finger swipe action is a LineageSettings key, so there is
-  nothing to save and restore around a session; make it a no-op
-- drop the bypass charge switch and its SelfRemovingSwitchPreference
-  wrapper, since the framework side needs the LineageOS HealthInterface
+AOSPA doesn't ship the LineageOS SDK, so:
+- Use the platform gson module instead of the crDroid prebuilt.
+- Make the three finger screenshot setting a no-op.
+- Drop the bypass charging toggle, which needs the Lineage health HAL.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
 ---
- app/src/main/Android.bp                       |  2 -
+ app/src/main/Android.bp                       |  4 +-
  .../SystemSettingSwitchPreference.java        | 54 -------------------
  .../gamespace/data/SystemSettings.kt          | 15 ++----
- .../gamespace/settings/SettingsFragment.kt    |  9 ----
+ .../gamespace/hub/HubSettingsActivity.kt      |  2 -
  app/src/main/res/xml/root_preferences.xml     |  6 ---
- 5 files changed, 4 insertions(+), 82 deletions(-)
+ 5 files changed, 5 insertions(+), 76 deletions(-)
  delete mode 100644 app/src/main/java/com/crdroid/settings/preferences/SystemSettingSwitchPreference.java
 
 diff --git a/app/src/main/Android.bp b/app/src/main/Android.bp
-index 9008148..4096a88 100644
+index f71d14a..b895ea6 100644
 --- a/app/src/main/Android.bp
 +++ b/app/src/main/Android.bp
-@@ -23,8 +23,6 @@ android_app {
+@@ -21,10 +21,8 @@ android_app {
+         "com.google.android.material_material",
+         "kotlin-stdlib",
          "kotlinx-coroutines-android",
-         "gson",
+-        "gson-prebuilt-jar-2.9.1",
++        "gson",
          "hilt_android",
 -        "org.lineageos.platform.internal",
 -        "LineagePreferenceLib",
@@ -93,19 +95,19 @@ index 98526e4..0000000
 -                key, defaultValue ? 1 : 0, UserHandle.USER_CURRENT) != 0;
 -    }
 -}
-diff --git a/app/src/main/java/io/chaldeaprjkt/gamespace/data/SystemSettings.kt b/app/src/main/java/io/chaldeaprjkt/gamespace/data/SystemSettings.kt
-index 060904b..517637c 100644
---- a/app/src/main/java/io/chaldeaprjkt/gamespace/data/SystemSettings.kt
-+++ b/app/src/main/java/io/chaldeaprjkt/gamespace/data/SystemSettings.kt
+diff --git a/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt b/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
+index 5eedeaa..8ca27aa 100644
+--- a/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
++++ b/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
 @@ -24,7 +24,6 @@ import android.provider.Settings
- import io.chaldeaprjkt.gamespace.utils.GameModeUtils
+ import com.ireddragonicy.gamespace.utils.GameModeUtils
  import javax.inject.Inject
  
 -import lineageos.providers.LineageSettings
  
  class SystemSettings @Inject constructor(
      context: Context,
-@@ -102,17 +101,11 @@ class SystemSettings @Inject constructor(
+@@ -109,17 +108,11 @@ class SystemSettings @Inject constructor(
              }
          }
  
@@ -127,31 +129,25 @@ index 060904b..517637c 100644
  
      var userGames
          get() =
-diff --git a/app/src/main/java/io/chaldeaprjkt/gamespace/settings/SettingsFragment.kt b/app/src/main/java/io/chaldeaprjkt/gamespace/settings/SettingsFragment.kt
-index 2d52d14..07d961e 100644
---- a/app/src/main/java/io/chaldeaprjkt/gamespace/settings/SettingsFragment.kt
-+++ b/app/src/main/java/io/chaldeaprjkt/gamespace/settings/SettingsFragment.kt
-@@ -75,15 +75,6 @@ class SettingsFragment : Hilt_SettingsFragment(),
-     }
+diff --git a/app/src/main/java/com/ireddragonicy/gamespace/hub/HubSettingsActivity.kt b/app/src/main/java/com/ireddragonicy/gamespace/hub/HubSettingsActivity.kt
+index 3d4e248..2248f55 100644
+--- a/app/src/main/java/com/ireddragonicy/gamespace/hub/HubSettingsActivity.kt
++++ b/app/src/main/java/com/ireddragonicy/gamespace/hub/HubSettingsActivity.kt
+@@ -93,9 +93,7 @@ private fun HubSettingsScreen(onBack: () -> Unit) {
+             Toggle("call_overlay_enabled", "Call Overlay", "Show in-game call banner", true),
+             Choice("gamespace_calls_mode", "Incoming Calls", listOf("0" to "No action", "1" to "Auto answer", "2" to "Auto reject"), "0"),
+             Choice("gamespace_ringer_mode", "Ringer Mode", listOf("0" to "Silent", "1" to "Vibrate", "2" to "Normal", "3" to "No change"), "3"),
+-            Toggle("gamespace_tfgesture_disabled", "Block 3-Finger Screenshot", "Prevent accidental screenshot gesture", false),
+             Toggle("gamespace_lock_gesture", "Lock Gestures", "Block navigation gestures", false),
+-            Toggle("bypass_charge_enabled", "Bypass Charging", "Power the SoC directly in game", false),
+             IntSlider("gamespace_icon_idle_alpha", "Idle Bar Opacity", 5, 100, 25),
  
-     private fun updatePreferences() {
--        val isBypassSupported =
--            Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
--            SystemProperties.getBoolean("persist.sys.battery_bypass_supported", false)
--
--        if (!isBypassSupported) {
--            findPreference<PreferenceCategory>("in_game_preferences")
--                ?.removePreference(findPreference("bypass_charge_enabled")!!)
--        }
--
-         if (!hasVibrator()) {
-             findPreference<PreferenceCategory>("in_game_preferences")
-                 ?.removePreference(findPreference("gamespace_pulse_bass_haptics_disabled")!!)
+             Section("Library"),
 diff --git a/app/src/main/res/xml/root_preferences.xml b/app/src/main/res/xml/root_preferences.xml
-index c0e671d..92a702a 100644
+index bb0a90c..0da6bc2 100644
 --- a/app/src/main/res/xml/root_preferences.xml
 +++ b/app/src/main/res/xml/root_preferences.xml
-@@ -110,12 +110,6 @@
+@@ -124,12 +124,6 @@
              android:summary="@string/lock_gesture_summary"
              android:defaultValue="false" />
  

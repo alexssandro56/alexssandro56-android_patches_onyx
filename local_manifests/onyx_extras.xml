@@ -11,11 +11,11 @@
              remote="onyx-extras-github"
              revision="ccr-786c7be0-pn26hi" />
 
-    <!-- GameSpace app, crDroid 17.0 -->
+    <!-- GameSpace app, IRedDragonICY -->
     <project path="packages/apps/GameSpace"
-             name="crdroidandroid/android_packages_apps_GameSpace"
+             name="IRedDragonICY/GameSpace"
              remote="onyx-extras-github"
-             revision="17.0" />
+             revision="main" />
 
     <!-- Open-source replacement for mi_thermald -->
     <project path="external/mithermald"

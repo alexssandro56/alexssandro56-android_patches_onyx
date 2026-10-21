@@ -1,44 +1,131 @@
-From 17f59b4645f51dc8d620c4e9b4f618972f6333e7 Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Wed, 21 Oct 2026 23:16:53 +0000
+From c4d03074bc58a8c68bb7173f2efa3019cecb0db9 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:35:32 +0000
 Subject: [PATCH] base: Add GameSpace support
 
-Port of the crDroid 17.0 GameSpace framework support:
+Framework side for IRedDragonICY's GameSpace (com.ireddragonicy.gamespace).
+
+Detection and dispatch come from the crDroid 17.0 GameSpace support:
 - 5c0bee650d4 core: adding support for game space (rmp22, from AxionOS)
 - 2133c5519ab services: Treat gamespace apps as games (rmp22)
 - cd8470b5b68 services: Add toggle for gamespace auto detect apps
   (Pranav Vashi)
 
 GameSpaceService tracks the focused app on the default display and
-starts io.chaldeaprjkt.gamespace's SessionService when a game from
-gamespace_game_list comes to the front, and stops it when the game
-leaves or the keyguard shows. While a game is active, full screen
-intents are suppressed in SystemUI.
+tells GameSpace when a game from gamespace_game_list comes to the
+front, and when it leaves or the keyguard shows. While a game is
+active, full screen intents are suppressed in SystemUI.
+
+IRedDragonICY's GameSpace expects a game_space binder service, whose
+framework patches aren't published, so it is written here:
+- IGameSpaceService: registerCallback, unregisterCallback and
+  dumpSocketStats (the /proc/net sockets the ping monitor reads), all
+  behind MANAGE_GAME_MODE
+- IGameSpaceCallback: onGameStart(packageName) and onGameLeave()
+Until the app registers its callback, GameStateDispatcher starts its
+GameSpaceService with game_start/game_stop instead.
 
 Adapted to AOSPA: the hooks sit next to AOSPA's own code (no
-AxSandboxService here), and the bypass-charge path in
-GameStateDispatcher is dropped since it needs the LineageOS SDK
-HealthInterface, which AOSPA doesn't ship.
+AxSandboxService here), and the bypass-charge path is dropped since it
+needs the LineageOS SDK HealthInterface, which AOSPA doesn't ship.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
 ---
+ .../internal/app/IGameSpaceCallback.aidl      |  26 ++
+ .../internal/app/IGameSpaceService.aidl       |  34 ++
  .../collection/NotificationEntry.java         |   9 +
  .../StatusBarNotificationActivityStarter.java |   3 +
- .../server/app/GameManagerService.java        |  18 ++
+ .../server/app/GameManagerService.java        |  18 +
  .../server/wm/ActivityTaskSupervisor.java     |   5 +
  .../com/android/server/wm/DisplayContent.java |   8 +
- .../android/server/wm/GameListManager.java    | 237 ++++++++++++++++++
- .../android/server/wm/GamePackageHandler.java |  92 +++++++
- .../android/server/wm/GameSpaceService.java   | 196 +++++++++++++++
- .../server/wm/GameStateDispatcher.java        | 103 ++++++++
+ .../android/server/wm/GameListManager.java    | 237 +++++++++++++
+ .../android/server/wm/GamePackageHandler.java |  92 +++++
+ .../android/server/wm/GameSpaceService.java   | 325 ++++++++++++++++++
+ .../server/wm/GameStateDispatcher.java        | 126 +++++++
  .../android/server/wm/KeyguardController.java |   9 +
  .../java/com/android/server/SystemServer.java |   5 +
- 11 files changed, 685 insertions(+)
+ 13 files changed, 897 insertions(+)
+ create mode 100644 core/java/com/android/internal/app/IGameSpaceCallback.aidl
+ create mode 100644 core/java/com/android/internal/app/IGameSpaceService.aidl
  create mode 100644 services/core/java/com/android/server/wm/GameListManager.java
  create mode 100644 services/core/java/com/android/server/wm/GamePackageHandler.java
  create mode 100644 services/core/java/com/android/server/wm/GameSpaceService.java
  create mode 100644 services/core/java/com/android/server/wm/GameStateDispatcher.java
 
+diff --git a/core/java/com/android/internal/app/IGameSpaceCallback.aidl b/core/java/com/android/internal/app/IGameSpaceCallback.aidl
+new file mode 100644
+index 00000000..8534a07c
+--- /dev/null
++++ b/core/java/com/android/internal/app/IGameSpaceCallback.aidl
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.app;
++
++/**
++ * Told by the game_space service when a game comes to the front or leaves.
++ * {@hide}
++ */
++oneway interface IGameSpaceCallback {
++    void onGameStart(String packageName);
++    void onGameLeave();
++}
+diff --git a/core/java/com/android/internal/app/IGameSpaceService.aidl b/core/java/com/android/internal/app/IGameSpaceService.aidl
+new file mode 100644
+index 00000000..0f248bf9
+--- /dev/null
++++ b/core/java/com/android/internal/app/IGameSpaceService.aidl
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.app;
++
++import com.android.internal.app.IGameSpaceCallback;
++
++/**
++ * The game_space system service, used by the GameSpace app.
++ * {@hide}
++ */
++interface IGameSpaceService {
++    void registerCallback(IGameSpaceCallback callback);
++    void unregisterCallback(IGameSpaceCallback callback);
++
++    /**
++     * Sockets from /proc/net, one per line as
++     * "proto 0 0 local_address remote_address state uid".
++     */
++    String[] dumpSocketStats();
++}
 diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java
 index 1c080ea5..b1685262 100644
 --- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java
@@ -517,10 +604,10 @@ index 00000000..697712ee
 +}
 diff --git a/services/core/java/com/android/server/wm/GameSpaceService.java b/services/core/java/com/android/server/wm/GameSpaceService.java
 new file mode 100644
-index 00000000..2847bdd9
+index 00000000..9963776d
 --- /dev/null
 +++ b/services/core/java/com/android/server/wm/GameSpaceService.java
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,325 @@
 +/*
 + * Copyright (C) 2025-2026 AxionOS
 + *
@@ -540,20 +627,38 @@ index 00000000..2847bdd9
 +
 +import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 +
++import android.Manifest;
 +import android.content.ComponentName;
 +import android.content.Context;
 +import android.content.Intent;
 +import android.os.Handler;
 +import android.os.Process;
++import android.os.RemoteException;
 +import android.util.Slog;
 +
++import com.android.internal.app.IGameSpaceCallback;
++import com.android.internal.app.IGameSpaceService;
 +import com.android.server.LocalServices;
 +import com.android.server.ServiceThread;
 +import com.android.server.SystemService;
 +
++import java.io.IOException;
++import java.net.InetAddress;
++import java.net.UnknownHostException;
++import java.nio.file.Files;
++import java.nio.file.Paths;
++import java.util.ArrayList;
++import java.util.List;
++
 +public final class GameSpaceService extends SystemService {
 +    private static final String TAG = "GameSpaceService";
 +    private static final long BOOST_DELAY_MS = 500L;
++    private static final String SERVICE_NAME = "game_space";
++    private static final String[] PROC_NET_SOCKETS = { "tcp", "tcp6", "udp", "udp6" };
++    private static final String[] TCP_STATES = {
++        "UNKNOWN", "ESTABLISHED", "SYN_SENT", "SYN_RECV", "FIN_WAIT1", "FIN_WAIT2",
++        "TIME_WAIT", "CLOSE", "CLOSE_WAIT", "LAST_ACK", "LISTEN", "CLOSING",
++    };
 +
 +    private final GameListManager mGameListManager;
 +    private final GameStateDispatcher mGameStateDispatcher;
@@ -578,6 +683,117 @@ index 00000000..2847bdd9
 +    @Override
 +    public void onStart() {
 +        publishLocalService(GameSpaceService.class, this);
++        publishBinderService(SERVICE_NAME, new BinderService());
++    }
++
++    private final class BinderService extends IGameSpaceService.Stub {
++        @Override
++        public void registerCallback(IGameSpaceCallback callback) {
++            enforceManageGameMode("registerCallback");
++            if (callback == null) {
++                return;
++            }
++            mGameStateDispatcher.registerCallback(callback);
++            // Catch the app up on a game that is already in front.
++            mHandler.post(() -> {
++                final String currentGame = mCurrentGame;
++                if (currentGame == null) {
++                    return;
++                }
++                try {
++                    callback.onGameStart(currentGame);
++                } catch (RemoteException e) {
++                    Slog.w(TAG, "Failed to notify a new GameSpace callback", e);
++                }
++            });
++        }
++
++        @Override
++        public void unregisterCallback(IGameSpaceCallback callback) {
++            enforceManageGameMode("unregisterCallback");
++            if (callback != null) {
++                mGameStateDispatcher.unregisterCallback(callback);
++            }
++        }
++
++        @Override
++        public String[] dumpSocketStats() {
++            enforceManageGameMode("dumpSocketStats");
++            final long token = clearCallingIdentity();
++            try {
++                return readSockets();
++            } finally {
++                restoreCallingIdentity(token);
++            }
++        }
++
++        private void enforceManageGameMode(String func) {
++            getContext().enforceCallingOrSelfPermission(Manifest.permission.MANAGE_GAME_MODE,
++                    func);
++        }
++    }
++
++    private static String[] readSockets() {
++        final List<String> sockets = new ArrayList<>();
++        for (String proto : PROC_NET_SOCKETS) {
++            final List<String> lines;
++            try {
++                lines = Files.readAllLines(Paths.get("/proc/net/" + proto));
++            } catch (IOException e) {
++                Slog.w(TAG, "Failed to read /proc/net/" + proto, e);
++                continue;
++            }
++            // Skip the header; columns are
++            // sl local_address rem_address st tx:rx tr:when retrnsmt uid ...
++            for (int i = 1; i < lines.size(); i++) {
++                final String[] fields = lines.get(i).trim().split("\\s+");
++                if (fields.length < 8) {
++                    continue;
++                }
++                final String local = formatAddress(fields[1]);
++                final String remote = formatAddress(fields[2]);
++                if (local == null || remote == null) {
++                    continue;
++                }
++                sockets.add(proto + " 0 0 " + local + " " + remote + " "
++                        + formatState(fields[3]) + " " + fields[7]);
++            }
++        }
++        return sockets.toArray(new String[0]);
++    }
++
++    /** "0100007F:0050" -> "127.0.0.1:80"; /proc/net stores each 32-bit word host-endian. */
++    private static String formatAddress(String hexAddress) {
++        final int colon = hexAddress.indexOf(':');
++        if (colon < 0) {
++            return null;
++        }
++        final String hexIp = hexAddress.substring(0, colon);
++        if (hexIp.length() != 8 && hexIp.length() != 32) {
++            return null;
++        }
++        try {
++            final byte[] ip = new byte[hexIp.length() / 2];
++            for (int word = 0; word < ip.length / 4; word++) {
++                for (int b = 0; b < 4; b++) {
++                    final int pos = word * 8 + (3 - b) * 2;
++                    ip[word * 4 + b] = (byte) Integer.parseInt(hexIp.substring(pos, pos + 2), 16);
++                }
++            }
++            final int port = Integer.parseInt(hexAddress.substring(colon + 1), 16);
++            return InetAddress.getByAddress(ip).getHostAddress() + ":" + port;
++        } catch (NumberFormatException | UnknownHostException e) {
++            return null;
++        }
++    }
++
++    private static String formatState(String hexState) {
++        try {
++            final int state = Integer.parseInt(hexState, 16);
++            return state > 0 && state < TCP_STATES.length ? TCP_STATES[state] : TCP_STATES[0];
++        } catch (NumberFormatException e) {
++            return TCP_STATES[0];
++        }
 +    }
 +
 +    @Override
@@ -719,10 +935,10 @@ index 00000000..2847bdd9
 +}
 diff --git a/services/core/java/com/android/server/wm/GameStateDispatcher.java b/services/core/java/com/android/server/wm/GameStateDispatcher.java
 new file mode 100644
-index 00000000..226b7133
+index 00000000..ef866533
 --- /dev/null
 +++ b/services/core/java/com/android/server/wm/GameStateDispatcher.java
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,126 @@
 +/*
 + * Copyright (C) 2025-2026 AxionOS
 + *
@@ -745,20 +961,22 @@ index 00000000..226b7133
 +import android.content.ComponentName;
 +import android.content.Context;
 +import android.content.Intent;
++import android.os.RemoteCallbackList;
 +import android.os.RemoteException;
 +import android.os.SystemProperties;
 +import android.os.UserHandle;
 +import android.provider.Settings;
 +import android.util.Slog;
 +
++import com.android.internal.app.IGameSpaceCallback;
++
 +class GameStateDispatcher {
 +    private static final String TAG = "GameStateDispatcher";
-+    private static final String GAME_SPACE_PACKAGE = "io.chaldeaprjkt.gamespace";
-+    private static final String GAME_SPACE_SESSION_SERVICE =
-+            "io.chaldeaprjkt.gamespace.gamebar.SessionService";
-+    private static final ComponentName GAME_SPACE_SESSION_COMPONENT =
-+            new ComponentName(GAME_SPACE_PACKAGE, GAME_SPACE_SESSION_SERVICE);
++    private static final String GAME_SPACE_PACKAGE = "com.ireddragonicy.gamespace";
++    private static final ComponentName GAME_SPACE_SERVICE_COMPONENT = new ComponentName(
++            GAME_SPACE_PACKAGE, GAME_SPACE_PACKAGE + ".gamebar.GameSpaceService");
 +    private static final String ACTION_GAME_START = "game_start";
++    private static final String ACTION_GAME_STOP = "game_stop";
 +    private static final String EXTRA_PACKAGE_NAME = "package_name";
 +    private static final String KEY_GAMING_MODE_ACTIVE = "ax_gaming_mode_active";
 +    private static final String KEY_POWER_MODE_PERF_BY_USER = "power_mode_perf_by_user";
@@ -766,16 +984,32 @@ index 00000000..226b7133
 +
 +    private final Context mContext;
 +    private final IActivityManager mActivityManager;
++    private final RemoteCallbackList<IGameSpaceCallback> mCallbacks = new RemoteCallbackList<>();
 +
 +    GameStateDispatcher(Context context) {
 +        mContext = context;
 +        mActivityManager = ActivityManager.getService();
 +    }
 +
++    void registerCallback(IGameSpaceCallback callback) {
++        mCallbacks.register(callback);
++    }
++
++    void unregisterCallback(IGameSpaceCallback callback) {
++        mCallbacks.unregister(callback);
++    }
++
 +    void dispatchGameState(boolean active, String packageName) {
 +        Settings.Secure.putIntForUser(mContext.getContentResolver(), KEY_GAMING_MODE_ACTIVE,
 +                active ? 1 : 0, UserHandle.USER_CURRENT);
-+        updateGameSession(active, packageName);
++        if (active && packageName == null) {
++            return;
++        }
++        // GameSpace registers a callback once its service is up. Until then, start
++        // that service with the event instead, so the first game is not missed.
++        if (!notifyCallbacks(active, packageName)) {
++            startGameSpaceService(active, packageName);
++        }
 +    }
 +
 +    void boostGame(boolean enable) {
@@ -790,39 +1024,44 @@ index 00000000..226b7133
 +        SystemProperties.set(KEY_POWER_MODE_PERF, enable ? "1" : "0");
 +    }
 +
-+    private void updateGameSession(boolean active, String packageName) {
-+        if (active) {
-+            startGameSession(packageName);
-+            return;
++    private boolean notifyCallbacks(boolean active, String packageName) {
++        int delivered = 0;
++        final int count = mCallbacks.beginBroadcast();
++        try {
++            for (int i = 0; i < count; i++) {
++                final IGameSpaceCallback callback = mCallbacks.getBroadcastItem(i);
++                try {
++                    if (active) {
++                        callback.onGameStart(packageName);
++                    } else {
++                        callback.onGameLeave();
++                    }
++                    delivered++;
++                } catch (RemoteException e) {
++                    Slog.w(TAG, "Failed to notify GameSpace", e);
++                }
++            }
++        } finally {
++            mCallbacks.finishBroadcast();
 +        }
-+        stopGameSession();
++        return delivered > 0;
 +    }
 +
-+    private void startGameSession(String packageName) {
-+        if (packageName == null) {
-+            return;
++    private void startGameSpaceService(boolean active, String packageName) {
++        final Intent intent = new Intent(active ? ACTION_GAME_START : ACTION_GAME_STOP)
++                .setComponent(GAME_SPACE_SERVICE_COMPONENT);
++        if (active) {
++            intent.putExtra(EXTRA_PACKAGE_NAME, packageName);
 +        }
-+        final Intent intent = new Intent(ACTION_GAME_START)
-+                .setComponent(GAME_SPACE_SESSION_COMPONENT)
-+                .putExtra(EXTRA_PACKAGE_NAME, packageName);
 +        try {
 +            final ComponentName result = mActivityManager.startService(null, intent, null, false,
 +                    mContext.getOpPackageName(), mContext.getAttributionTag(),
 +                    UserHandle.USER_CURRENT);
 +            if (result == null) {
-+                Slog.w(TAG, "GameSpace session service not found");
++                Slog.w(TAG, "GameSpace service not found");
 +            }
 +        } catch (RemoteException | RuntimeException e) {
-+            Slog.w(TAG, "Failed to start GameSpace session", e);
-+        }
-+    }
-+
-+    private void stopGameSession() {
-+        final Intent intent = new Intent().setComponent(GAME_SPACE_SESSION_COMPONENT);
-+        try {
-+            mActivityManager.stopService(null, intent, null, UserHandle.USER_CURRENT);
-+        } catch (RemoteException | RuntimeException e) {
-+            Slog.w(TAG, "Failed to stop GameSpace session", e);
++            Slog.w(TAG, "Failed to start GameSpace service", e);
 +        }
 +    }
 +}

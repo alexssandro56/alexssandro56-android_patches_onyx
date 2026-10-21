@@ -1,0 +1,2 @@
+# game_space binder service, published by GameSpaceService in system_server
+type game_space_service, system_api_service, system_server_service, service_manager_type;
