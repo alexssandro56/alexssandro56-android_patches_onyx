@@ -1,0 +1,130 @@
+From 4588e0ccea11b1bb9d543d8c508c932226e0185f Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:43:39 +0000
+Subject: [PATCH 2/4] base: Stage AFME for the focused game
+
+When a game comes to the front, apply its AFME settings from GameSpace
+(gamespace_afme_multiplier, gamespace_afme_factor, gamespace_sgsr_mode,
+gamespace_smooth_motion) to the persist.sys.afme.* properties the layers
+read, and name it in persist.sys.afme.app so the EGL and Vulkan loaders
+load the AFME layers into that game only. When it leaves, clear
+persist.sys.afme.app.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ .../server/wm/GameStateDispatcher.java        | 73 +++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/services/core/java/com/android/server/wm/GameStateDispatcher.java b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+index ef866533..ec70a666 100644
+--- a/services/core/java/com/android/server/wm/GameStateDispatcher.java
++++ b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+@@ -25,10 +25,14 @@ import android.os.RemoteException;
+ import android.os.SystemProperties;
+ import android.os.UserHandle;
+ import android.provider.Settings;
++import android.text.TextUtils;
+ import android.util.Slog;
+ 
+ import com.android.internal.app.IGameSpaceCallback;
+ 
++import org.json.JSONException;
++import org.json.JSONObject;
++
+ class GameStateDispatcher {
+     private static final String TAG = "GameStateDispatcher";
+     private static final String GAME_SPACE_PACKAGE = "com.ireddragonicy.gamespace";
+@@ -41,6 +45,23 @@ class GameStateDispatcher {
+     private static final String KEY_POWER_MODE_PERF_BY_USER = "power_mode_perf_by_user";
+     private static final String KEY_POWER_MODE_PERF = "persist.sys.power_mode_perf";
+ 
++    // AFME frame generation. GameSpace keeps the per-game settings as JSON maps
++    // ({"<package>": <value>}) in Settings.System; the EGL and Vulkan loaders
++    // only load the AFME layers into the process named by PROP_AFME_APP.
++    private static final String KEY_AFME_MULTIPLIER = "gamespace_afme_multiplier";
++    private static final String KEY_AFME_FACTOR = "gamespace_afme_factor";
++    private static final String KEY_SGSR_MODE = "gamespace_sgsr_mode";
++    private static final String KEY_SMOOTH_MOTION = "gamespace_smooth_motion";
++    private static final String PROP_AFME_ENABLE = "persist.sys.afme.enable";
++    private static final String PROP_AFME_FG = "persist.sys.afme.fg";
++    private static final String PROP_AFME_MULTIPLIER = "persist.sys.afme.multiplier";
++    private static final String PROP_AFME_FACTOR = "persist.sys.afme.factor";
++    private static final String PROP_AFME_SMOOTH_MOTION = "persist.sys.afme.smooth_motion";
++    private static final String PROP_AFME_APP = "persist.sys.afme.app";
++    private static final String PROP_AFME_SESSION = "persist.sys.afme.session";
++    private static final String PROP_SGSR_ENABLE = "persist.sys.sgsr.enable";
++    private static final String PROP_SGSR_MODE = "persist.sys.sgsr.mode";
++
+     private final Context mContext;
+     private final IActivityManager mActivityManager;
+     private final RemoteCallbackList<IGameSpaceCallback> mCallbacks = new RemoteCallbackList<>();
+@@ -59,6 +80,8 @@ class GameStateDispatcher {
+     }
+ 
+     void dispatchGameState(boolean active, String packageName) {
++        // First, so the game's process sees it before it draws.
++        stageAfme(active ? packageName : null);
+         Settings.Secure.putIntForUser(mContext.getContentResolver(), KEY_GAMING_MODE_ACTIVE,
+                 active ? 1 : 0, UserHandle.USER_CURRENT);
+         if (active && packageName == null) {
+@@ -83,6 +106,56 @@ class GameStateDispatcher {
+         SystemProperties.set(KEY_POWER_MODE_PERF, enable ? "1" : "0");
+     }
+ 
++    /**
++     * Applies the game's AFME settings and arms the layers for it, or disarms
++     * them when {@code packageName} is null. A layer already loaded in a game
++     * keeps running and follows these properties.
++     */
++    private void stageAfme(String packageName) {
++        try {
++            if (packageName == null) {
++                SystemProperties.set(PROP_AFME_APP, "");
++                SystemProperties.set(PROP_AFME_SESSION, "0");
++                return;
++            }
++            final int multiplier = readPerApp(KEY_AFME_MULTIPLIER).optInt(packageName, 0);
++            final String factor = readPerApp(KEY_AFME_FACTOR).optString(packageName, "auto");
++            final int sgsrMode = readPerApp(KEY_SGSR_MODE).optInt(packageName, 0);
++            final boolean smoothMotion =
++                    readPerApp(KEY_SMOOTH_MOTION).optBoolean(packageName, false);
++            final boolean frameGen = multiplier >= 2;
++            final boolean armed = frameGen || sgsrMode > 0;
++
++            if (frameGen) {
++                SystemProperties.set(PROP_AFME_MULTIPLIER, Integer.toString(multiplier));
++            }
++            SystemProperties.set(PROP_AFME_FG, frameGen ? "1" : "0");
++            SystemProperties.set(PROP_AFME_FACTOR, "auto".equals(factor) ? "" : factor);
++            SystemProperties.set(PROP_SGSR_ENABLE, sgsrMode > 0 ? "1" : "0");
++            SystemProperties.set(PROP_SGSR_MODE, Integer.toString(sgsrMode));
++            SystemProperties.set(PROP_AFME_SMOOTH_MOTION, smoothMotion ? "1" : "0");
++            SystemProperties.set(PROP_AFME_ENABLE, armed ? "1" : "0");
++            SystemProperties.set(PROP_AFME_APP, armed ? packageName : "");
++            SystemProperties.set(PROP_AFME_SESSION, armed ? "1" : "0");
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Failed to stage AFME for " + packageName, e);
++        }
++    }
++
++    private JSONObject readPerApp(String key) {
++        final String json = Settings.System.getStringForUser(mContext.getContentResolver(), key,
++                UserHandle.USER_CURRENT);
++        if (TextUtils.isEmpty(json)) {
++            return new JSONObject();
++        }
++        try {
++            return new JSONObject(json);
++        } catch (JSONException e) {
++            Slog.w(TAG, "Ignoring malformed " + key);
++            return new JSONObject();
++        }
++    }
++
+     private boolean notifyCallbacks(boolean active, String packageName) {
+         int delivered = 0;
+         final int count = mCallbacks.beginBroadcast();
+-- 
+2.43.0
+

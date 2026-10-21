@@ -1,0 +1,3 @@
+# persist.sys.mithermal.*: GameSpace's thermal and charging profiles, read by
+# mi_thermal_engine on vendor.
+system_restricted_prop(mithermal_prop)

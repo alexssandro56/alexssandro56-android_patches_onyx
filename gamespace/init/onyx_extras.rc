@@ -1,0 +1,7 @@
+# Bypass charging, set by GameSpaceService while a game is in front: stop
+# charging the battery and run the phone from the charger.
+on property:sys.gamespace.bypass_charging=1
+    write /sys/class/xm_power/charger/smart_charge/smart_night 1
+
+on property:sys.gamespace.bypass_charging=0
+    write /sys/class/xm_power/charger/smart_charge/smart_night 0

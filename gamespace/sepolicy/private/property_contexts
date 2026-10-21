@@ -1,0 +1,4 @@
+persist.sys.afme.                         u:object_r:afme_prop:s0 prefix
+persist.sys.sgsr.                         u:object_r:afme_prop:s0 prefix
+persist.sys.mithermal.                    u:object_r:mithermal_prop:s0 prefix
+sys.gamespace.                            u:object_r:gamespace_prop:s0 prefix

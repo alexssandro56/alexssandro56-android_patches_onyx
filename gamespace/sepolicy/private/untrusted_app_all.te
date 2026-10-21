@@ -1,0 +1,2 @@
+# The AFME layers run inside the game and follow persist.sys.afme.*
+get_prop(untrusted_app_all, afme_prop)

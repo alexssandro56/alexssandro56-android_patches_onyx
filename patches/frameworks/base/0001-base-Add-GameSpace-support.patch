@@ -1,7 +1,7 @@
 From c4d03074bc58a8c68bb7173f2efa3019cecb0db9 Mon Sep 17 00:00:00 2001
 From: Alex <05jeelo30@gmail.com>
 Date: Wed, 21 Oct 2026 23:35:32 +0000
-Subject: [PATCH] base: Add GameSpace support
+Subject: [PATCH 1/4] base: Add GameSpace support
 
 Framework side for IRedDragonICY's GameSpace (com.ireddragonicy.gamespace).
 

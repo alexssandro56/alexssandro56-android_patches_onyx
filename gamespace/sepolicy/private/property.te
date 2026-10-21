@@ -1,0 +1,6 @@
+# persist.sys.afme.* and persist.sys.sgsr.*: AFME frame generation settings,
+# read by the AFME layers inside the game.
+system_internal_prop(afme_prop)
+
+# sys.gamespace.*: game session state that init acts on.
+system_internal_prop(gamespace_prop)

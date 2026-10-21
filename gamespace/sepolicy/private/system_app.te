@@ -1,2 +1,6 @@
 # GameSpace (com.ireddragonicy.gamespace) runs as system_app
 allow system_app game_space_service:service_manager find;
+
+# Per-game AFME settings and the mithermald profiles
+set_prop(system_app, afme_prop)
+set_prop(system_app, mithermal_prop)

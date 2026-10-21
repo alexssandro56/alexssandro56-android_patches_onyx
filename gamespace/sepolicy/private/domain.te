@@ -1,0 +1,3 @@
+# libEGL and libvulkan check persist.sys.afme.enable in every process that
+# draws; only games need the answer.
+dontaudit domain afme_prop:file r_file_perms;

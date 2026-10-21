@@ -1,0 +1,111 @@
+From d3b6582734e1d190dd28cb2bddc71dc0fb843f9b Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:55:53 +0000
+Subject: [PATCH 4/4] base: Bypass charging while a game is in front
+
+GameSpace has a bypass charging switch in its panel
+(mithermal_bypass_charging) and in its settings
+(smart_battery_bypass_charging). While a game is in front and either is
+on, set sys.gamespace.bypass_charging=1, which the device's init turns
+into a write to the charger node, so the phone runs from the charger
+instead of charging the battery.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ .../android/server/wm/GameSpaceService.java   |  1 +
+ .../server/wm/GameStateDispatcher.java        | 41 +++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/services/core/java/com/android/server/wm/GameSpaceService.java b/services/core/java/com/android/server/wm/GameSpaceService.java
+index 9963776d..85483b01 100644
+--- a/services/core/java/com/android/server/wm/GameSpaceService.java
++++ b/services/core/java/com/android/server/wm/GameSpaceService.java
+@@ -249,6 +249,7 @@ public final class GameSpaceService extends SystemService {
+         mStarted = true;
+         mGamePackageHandler.registerPackageReceiver();
+         mGameListManager.registerGameListObserver(mHandler);
++        mGameStateDispatcher.observeBypassCharging(mHandler);
+         mGameListManager.addListener(() -> mHandler.post(() -> {
+             if (mCurrentGame != null && mGameListManager.isGame(mCurrentGame)) {
+                 mGameStateDispatcher.boostGame(mGameListManager.isGameInPerfMode(mCurrentGame));
+diff --git a/services/core/java/com/android/server/wm/GameStateDispatcher.java b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+index ec70a666..756f2a9f 100644
+--- a/services/core/java/com/android/server/wm/GameStateDispatcher.java
++++ b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+@@ -20,6 +20,8 @@ import android.app.IActivityManager;
+ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.Intent;
++import android.database.ContentObserver;
++import android.os.Handler;
+ import android.os.RemoteCallbackList;
+ import android.os.RemoteException;
+ import android.os.SystemProperties;
+@@ -62,10 +64,20 @@ class GameStateDispatcher {
+     private static final String PROP_SGSR_ENABLE = "persist.sys.sgsr.enable";
+     private static final String PROP_SGSR_MODE = "persist.sys.sgsr.mode";
+ 
++    // Bypass charging: GameSpace's panel toggle and its settings switch. While a game
++    // is in front and either is on, init stops charging the battery and the phone
++    // runs from the charger (see onyx-extras' gamespace.rc).
++    private static final String[] KEYS_BYPASS_CHARGING = {
++        "mithermal_bypass_charging", "smart_battery_bypass_charging",
++    };
++    private static final String PROP_BYPASS_CHARGING = "sys.gamespace.bypass_charging";
++
+     private final Context mContext;
+     private final IActivityManager mActivityManager;
+     private final RemoteCallbackList<IGameSpaceCallback> mCallbacks = new RemoteCallbackList<>();
+ 
++    private boolean mGameActive;
++
+     GameStateDispatcher(Context context) {
+         mContext = context;
+         mActivityManager = ActivityManager.getService();
+@@ -82,6 +94,8 @@ class GameStateDispatcher {
+     void dispatchGameState(boolean active, String packageName) {
+         // First, so the game's process sees it before it draws.
+         stageAfme(active ? packageName : null);
++        mGameActive = active && packageName != null;
++        updateBypassCharging();
+         Settings.Secure.putIntForUser(mContext.getContentResolver(), KEY_GAMING_MODE_ACTIVE,
+                 active ? 1 : 0, UserHandle.USER_CURRENT);
+         if (active && packageName == null) {
+@@ -106,6 +120,33 @@ class GameStateDispatcher {
+         SystemProperties.set(KEY_POWER_MODE_PERF, enable ? "1" : "0");
+     }
+ 
++    /** Follows the bypass charging switches; {@code handler} serializes it with game events. */
++    void observeBypassCharging(Handler handler) {
++        final ContentObserver observer = new ContentObserver(handler) {
++            @Override
++            public void onChange(boolean selfChange) {
++                updateBypassCharging();
++            }
++        };
++        for (String key : KEYS_BYPASS_CHARGING) {
++            mContext.getContentResolver().registerContentObserver(
++                    Settings.System.getUriFor(key), false, observer, UserHandle.USER_ALL);
++        }
++    }
++
++    private void updateBypassCharging() {
++        boolean wanted = false;
++        for (String key : KEYS_BYPASS_CHARGING) {
++            wanted |= Settings.System.getIntForUser(mContext.getContentResolver(), key, 0,
++                    UserHandle.USER_CURRENT) == 1;
++        }
++        try {
++            SystemProperties.set(PROP_BYPASS_CHARGING, mGameActive && wanted ? "1" : "0");
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "Failed to update bypass charging", e);
++        }
++    }
++
+     /**
+      * Applies the game's AFME settings and arms the layers for it, or disarms
+      * them when {@code packageName} is null. A layer already loaded in a game
+-- 
+2.43.0
+

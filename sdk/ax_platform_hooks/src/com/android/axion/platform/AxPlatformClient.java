@@ -91,6 +91,8 @@ public class AxPlatformClient {
 
     public static final String ACTION_WIFI_CONNECT = "wifi_connect";
     public static final String ACTION_BT_CONNECT = "bt_connect";
+    /** Records the game whose task id is passed as the parameter (IRedDragonICY's GameSpace). */
+    public static final String ACTION_GAME_RECORD = "game_record";
 
     public static final int TILE_STATE_UNAVAILABLE = 0;
     public static final int TILE_STATE_INACTIVE = 1;

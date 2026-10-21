@@ -17,6 +17,12 @@
              remote="onyx-extras-github"
              revision="main" />
 
+    <!-- AFME frame generation layers -->
+    <project path="external/afme"
+             name="IRedDragonICY/afme"
+             remote="onyx-extras-github"
+             revision="main" />
+
     <!-- Open-source replacement for mi_thermald -->
     <project path="external/mithermald"
              name="IRedDragonICY/mithermald"

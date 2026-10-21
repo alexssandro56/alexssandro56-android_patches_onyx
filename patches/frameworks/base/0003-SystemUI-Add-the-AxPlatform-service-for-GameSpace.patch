@@ -1,0 +1,1882 @@
+From d74280e8044a51591e3542987b38755019a031d2 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:55:53 +0000
+Subject: [PATCH 3/4] SystemUI: Add the AxPlatform service for GameSpace
+
+GameSpace's game panel binds to com.android.systemui.action.AX_PLATFORM
+(AxPlatformClient from ax_platform_hooks) for its quick toggles, the
+screenshot and screen record buttons and system state (battery, media,
+keyguard, doze, configuration).
+
+Port crDroid 17.0's implementation (from AxionOS), minus what needs the
+LineageOS SDK (profiles, reading mode) or isn't in AOSPA (smart pixels):
+- Labels AOSPA has no strings for are plain text.
+- Disconnect the VPN through VpnManager, since AOSPA's SecurityController
+  can't.
+- Mobile data state has no isDefault/level, which AOSPA's
+  MobileDataIndicators doesn't carry.
+- Accept IRedDragonICY's GameSpace, and map its game record action to
+  the regular screen recorder.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ packages/SystemUI/Android.bp                  |   1 +
+ packages/SystemUI/AndroidManifest.xml         |   9 +
+ .../systemui/ax/AxPlatformBinderService.kt    |  26 +
+ .../ax/AxPlatformFeatureController.kt         | 444 ++++++++++
+ .../systemui/ax/AxPlatformFeatureMapper.kt    | 141 +++
+ .../systemui/ax/AxPlatformObservers.kt        | 816 ++++++++++++++++++
+ .../systemui/ax/AxPlatformServiceImpl.kt      | 122 +++
+ .../systemui/ax/AxPlatformStateManager.kt     | 197 +++++
+ .../dagger/SystemUICoreStartableModule.kt     |   7 +
+ 9 files changed, 1763 insertions(+)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformBinderService.kt
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureMapper.kt
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformObservers.kt
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformServiceImpl.kt
+ create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformStateManager.kt
+
+diff --git a/packages/SystemUI/Android.bp b/packages/SystemUI/Android.bp
+index 827c8c4c..34c516ba 100644
+--- a/packages/SystemUI/Android.bp
++++ b/packages/SystemUI/Android.bp
+@@ -573,6 +573,7 @@ android_library {
+         "SurfaceEffectsComposeLib",
+         "uilatencystats_flags_core_java_lib",
+         "personalcontext_ace_visualizer",
++        "ax_platform_hooks",
+     ],
+     enable_ksp: true,
+     annotation_processor_flags: [
+diff --git a/packages/SystemUI/AndroidManifest.xml b/packages/SystemUI/AndroidManifest.xml
+index e2c2c2fa..8d52e1f7 100644
+--- a/packages/SystemUI/AndroidManifest.xml
++++ b/packages/SystemUI/AndroidManifest.xml
+@@ -463,6 +463,15 @@
+         <service android:name="SystemUIService"
+             android:exported="true"
+         />
++        <!-- Platform hooks for GameSpace (AxPlatformClient). Callers that change
++             state are checked in AxPlatformServiceImpl. -->
++        <service
++            android:name=".ax.AxPlatformBinderService"
++            android:exported="true">
++            <intent-filter>
++                <action android:name="com.android.systemui.action.AX_PLATFORM" />
++            </intent-filter>
++        </service>
+         <service android:name=".wallet.controller.WalletContextualLocationsService"
+             android:exported="true"
+             />
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformBinderService.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformBinderService.kt
+new file mode 100644
+index 00000000..e849a187
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformBinderService.kt
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.app.Service
++import android.content.Intent
++import android.os.IBinder
++
++class AxPlatformBinderService : Service() {
++
++    override fun onBind(intent: Intent?): IBinder? = AxPlatformServiceImpl.sBinder
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt
+new file mode 100644
+index 00000000..3919757a
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt
+@@ -0,0 +1,444 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.app.ActivityManager
++import android.app.UiModeManager
++import android.content.ContentResolver
++import android.content.Context
++import android.content.Intent
++import android.content.res.Configuration
++import android.hardware.SensorPrivacyManager
++import android.hardware.display.ColorDisplayManager
++import android.os.Handler
++import android.os.Looper
++import android.view.WindowManager
++import com.android.internal.util.ScreenshotHelper
++import android.media.projection.StopReason
++import android.net.TetheringManager
++import android.net.VpnManager
++import android.nfc.NfcAdapter
++import android.os.PowerManager
++import android.os.RemoteException
++import android.os.ServiceManager
++import android.os.UserHandle
++import android.provider.Settings
++import android.service.dreams.IDreamManager
++import android.util.Log
++import com.android.axion.platform.AxPlatformClient
++import com.android.internal.net.VpnConfig
++import com.android.settingslib.bluetooth.CachedBluetoothDevice
++import com.android.settingslib.bluetooth.LocalBluetoothManager
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.statusbar.connectivity.AccessPointController
++import com.android.systemui.statusbar.connectivity.NetworkController
++import com.android.systemui.statusbar.phone.ManagedProfileController
++import com.android.systemui.statusbar.policy.BatteryController
++import com.android.systemui.statusbar.policy.BluetoothController
++import com.android.systemui.statusbar.policy.CastController
++import com.android.systemui.statusbar.policy.DataSaverController
++import com.android.systemui.statusbar.policy.FlashlightController
++import com.android.systemui.statusbar.policy.HotspotController
++import com.android.systemui.statusbar.policy.IndividualSensorPrivacyController
++import com.android.systemui.statusbar.policy.LocationController
++import com.android.systemui.statusbar.policy.RotationLockController
++import com.android.systemui.screenrecord.ScreenRecordUxController
++import com.android.systemui.statusbar.policy.SecurityController
++import com.android.systemui.statusbar.policy.ZenModeController
++import com.android.wifitrackerlib.WifiEntry
++import javax.inject.Inject
++
++@SysUISingleton
++class AxPlatformFeatureController @Inject constructor(
++    private val context: Context,
++    private val stateManager: AxPlatformStateManager,
++    private val networkController: NetworkController,
++    private val accessPointController: AccessPointController,
++    private val bluetoothController: BluetoothController,
++    private val hotspotController: HotspotController,
++    private val flashlightController: FlashlightController,
++    private val locationController: LocationController,
++    private val rotationLockController: RotationLockController,
++    private val batteryController: BatteryController,
++    private val zenModeController: ZenModeController,
++    private val dataSaverController: DataSaverController,
++    private val localBluetoothManager: LocalBluetoothManager?,
++    private val sensorPrivacyController: IndividualSensorPrivacyController,
++    private val managedProfileController: ManagedProfileController,
++    private val securityController: SecurityController,
++    private val castController: CastController,
++    private val screenRecordUxController: ScreenRecordUxController,
++    powerManager: PowerManager
++) {
++
++    internal val wakeLock: PowerManager.WakeLock =
++        powerManager.newWakeLock(PowerManager.FULL_WAKE_LOCK, "AxPlatform:Caffeine")
++    private val nfcAdapter: NfcAdapter? = NfcAdapter.getDefaultAdapter(context)
++    private val uiModeManager: UiModeManager = context.getSystemService(UiModeManager::class.java)
++    private val colorDisplayManager: ColorDisplayManager =
++        context.getSystemService(ColorDisplayManager::class.java)
++    private val tetheringManager: TetheringManager? =
++        context.getSystemService(TetheringManager::class.java)
++    private val vpnManager: VpnManager? = context.getSystemService(VpnManager::class.java)
++    internal val dreamManager: IDreamManager? = try {
++        IDreamManager.Stub.asInterface(ServiceManager.getService("dreams"))
++    } catch (e: Exception) { null }
++    private val screenshotHelper = ScreenshotHelper(context)
++    private val screenshotHandler = Handler(Looper.getMainLooper())
++
++    var latestAccessPoints: List<WifiEntry> = emptyList()
++
++    val supportedFeatures: Array<String> by lazy {
++        buildList {
++            addAll(BASE_FEATURES)
++            if (nfcAdapter != null)
++                add(AxPlatformClient.FEATURE_NFC)
++            if (sensorPrivacyController.supportsSensorToggle(SensorPrivacyManager.Sensors.CAMERA))
++                add(AxPlatformClient.FEATURE_CAMERA_PRIVACY)
++            if (sensorPrivacyController.supportsSensorToggle(SensorPrivacyManager.Sensors.MICROPHONE))
++                add(AxPlatformClient.FEATURE_MIC_PRIVACY)
++            add(AxPlatformClient.FEATURE_WORK_PROFILE)
++            if (tetheringManager?.isTetheringSupported == true)
++                add(AxPlatformClient.FEATURE_USB_TETHER)
++            if (dreamManager != null)
++                add(AxPlatformClient.FEATURE_DREAM)
++            if (batteryController.isReverseSupported)
++                add(AxPlatformClient.FEATURE_POWER_SHARE)
++            add(AxPlatformClient.FEATURE_CAFFEINE)
++            add(AxPlatformClient.FEATURE_VPN)
++            add(AxPlatformClient.FEATURE_CAST)
++            add(AxPlatformClient.FEATURE_SCREEN_RECORD)
++            add(AxPlatformClient.FEATURE_SCREENSHOT)
++        }.toTypedArray()
++    }
++
++    fun toggle(feature: String) {
++        when (feature) {
++            AxPlatformClient.FEATURE_WIFI -> {
++                val current = stateManager.getState(feature).getBoolean("enabled", false)
++                networkController.setWifiEnabled(!current)
++            }
++            AxPlatformClient.FEATURE_MOBILE_DATA -> {
++                val ctrl = networkController.mobileDataController ?: return
++                ctrl.isMobileDataEnabled = !ctrl.isMobileDataEnabled
++            }
++            AxPlatformClient.FEATURE_BLUETOOTH ->
++                bluetoothController.setBluetoothEnabled(!bluetoothController.isBluetoothEnabled)
++            AxPlatformClient.FEATURE_HOTSPOT -> {
++                val current = stateManager.getState(feature).getBoolean("enabled", false)
++                hotspotController.setHotspotEnabled(!current)
++            }
++            AxPlatformClient.FEATURE_FLASHLIGHT -> {
++                if (flashlightController.hasFlashlight())
++                    flashlightController.setFlashlight(!flashlightController.isEnabled)
++            }
++            AxPlatformClient.FEATURE_LOCATION ->
++                locationController.setLocationEnabled(!locationController.isLocationEnabled)
++            AxPlatformClient.FEATURE_ROTATION ->
++                rotationLockController.setRotationLocked(
++                    !rotationLockController.isRotationLocked, TAG
++                )
++            AxPlatformClient.FEATURE_BATTERY_SAVER ->
++                batteryController.setPowerSaveMode(!batteryController.isPowerSave)
++            AxPlatformClient.FEATURE_ZEN -> {
++                val current = zenModeController.zen
++                zenModeController.setZen(if (current == 0) 1 else 0, null, TAG)
++            }
++            AxPlatformClient.FEATURE_DATA_SAVER ->
++                dataSaverController.setDataSaverEnabled(!dataSaverController.isDataSaverEnabled)
++            AxPlatformClient.FEATURE_AOD ->
++                stateManager.toggleSecure(Settings.Secure.DOZE_ALWAYS_ON)
++            AxPlatformClient.FEATURE_AIRPLANE_MODE -> {
++                val enabled = !stateManager.getGlobalBool(Settings.Global.AIRPLANE_MODE_ON)
++                stateManager.setGlobalBool(Settings.Global.AIRPLANE_MODE_ON, enabled)
++                context.sendBroadcastAsUser(
++                    Intent(Intent.ACTION_AIRPLANE_MODE_CHANGED).putExtra("state", enabled),
++                    UserHandle.ALL
++                )
++            }
++            AxPlatformClient.FEATURE_NFC -> nfcAdapter?.let {
++                if (it.isEnabled) it.disable() else it.enable()
++            }
++            AxPlatformClient.FEATURE_DARK_MODE ->
++                uiModeManager.setNightModeActivated(
++                    !isDarkMode(context.resources.configuration)
++                )
++            AxPlatformClient.FEATURE_NIGHT_LIGHT ->
++                colorDisplayManager.setNightDisplayActivated(
++                    !colorDisplayManager.isNightDisplayActivated
++                )
++            AxPlatformClient.FEATURE_COLOR_INVERSION ->
++                stateManager.toggleSecure(Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED)
++            AxPlatformClient.FEATURE_COLOR_CORRECTION ->
++                stateManager.toggleSecure(Settings.Secure.ACCESSIBILITY_DISPLAY_DALTONIZER_ENABLED)
++            AxPlatformClient.FEATURE_REDUCE_BRIGHTNESS ->
++                stateManager.toggleSecure(SETTING_REDUCE_BRIGHT)
++            AxPlatformClient.FEATURE_ONE_HANDED_MODE ->
++                stateManager.toggleSecure(SETTING_ONE_HANDED)
++            AxPlatformClient.FEATURE_HEADS_UP ->
++                stateManager.toggleGlobal(Settings.Global.HEADS_UP_NOTIFICATIONS_ENABLED)
++            AxPlatformClient.FEATURE_AUTO_SYNC ->
++                ContentResolver.setMasterSyncAutomatically(
++                    !ContentResolver.getMasterSyncAutomatically()
++                )
++            AxPlatformClient.FEATURE_CAMERA_PRIVACY ->
++                sensorPrivacyController.setSensorBlocked(
++                    SensorPrivacyManager.Sources.QS_TILE,
++                    SensorPrivacyManager.Sensors.CAMERA,
++                    !sensorPrivacyController.isSensorBlocked(SensorPrivacyManager.Sensors.CAMERA)
++                )
++            AxPlatformClient.FEATURE_MIC_PRIVACY ->
++                sensorPrivacyController.setSensorBlocked(
++                    SensorPrivacyManager.Sources.QS_TILE,
++                    SensorPrivacyManager.Sensors.MICROPHONE,
++                    !sensorPrivacyController.isSensorBlocked(
++                        SensorPrivacyManager.Sensors.MICROPHONE
++                    )
++                )
++            AxPlatformClient.FEATURE_WORK_PROFILE ->
++                managedProfileController.setWorkModeEnabled(
++                    !managedProfileController.isWorkModeEnabled
++                )
++            AxPlatformClient.FEATURE_USB_TETHER -> {
++                val current = stateManager.getState(feature).getBoolean("active", false)
++                tetheringManager?.setUsbTethering(!current)
++            }
++            AxPlatformClient.FEATURE_DREAM -> try {
++                dreamManager?.let { if (it.isDreaming) it.awaken() else it.dream() }
++            } catch (e: RemoteException) {
++                Log.w(TAG, "Dream toggle failed", e)
++            }
++            AxPlatformClient.FEATURE_POWER_SHARE ->
++                batteryController.setReverseState(!batteryController.isReverseOn)
++            AxPlatformClient.FEATURE_CAFFEINE -> {
++                if (wakeLock.isHeld) {
++                    wakeLock.release()
++                } else {
++                    wakeLock.acquire(CAFFEINE_DURATION_MS)
++                }
++                stateManager.broadcastBool(feature, wakeLock.isHeld)
++            }
++            AxPlatformClient.FEATURE_VPN -> {
++                if (securityController.isVpnEnabled) {
++                    disconnectPrimaryVpn()
++                }
++            }
++            AxPlatformClient.FEATURE_CAST -> {
++                val active = castController.castDevices.firstOrNull { it.isCasting }
++                active?.let { castController.stopCasting(it, StopReason.STOP_QS_TILE) }
++            }
++            AxPlatformClient.FEATURE_SCREEN_RECORD -> {
++                if (screenRecordUxController.isStarting) {
++                    screenRecordUxController.cancelCountdown()
++                } else if (screenRecordUxController.isRecording) {
++                    screenRecordUxController.stopRecording(StopReason.STOP_QS_TILE)
++                } else {
++                    screenRecordUxController.createScreenRecordDialog(null).show()
++                }
++            }
++            AxPlatformClient.FEATURE_SCREENSHOT -> {
++                screenshotHandler.postDelayed({
++                    screenshotHelper.takeScreenshot(
++                        WindowManager.TAKE_SCREENSHOT_FULLSCREEN,
++                        WindowManager.ScreenshotSource.SCREENSHOT_OTHER,
++                        screenshotHandler,
++                        null
++                    )
++                }, SCREENSHOT_DELAY_MS)
++            }
++            else -> Log.w(TAG, "Unknown toggle: $feature")
++        }
++    }
++
++    fun setEnabled(feature: String, enabled: Boolean) {
++        when (feature) {
++            AxPlatformClient.FEATURE_WIFI -> networkController.setWifiEnabled(enabled)
++            AxPlatformClient.FEATURE_MOBILE_DATA ->
++                networkController.mobileDataController?.let { it.isMobileDataEnabled = enabled }
++            AxPlatformClient.FEATURE_BLUETOOTH -> bluetoothController.setBluetoothEnabled(enabled)
++            AxPlatformClient.FEATURE_HOTSPOT -> hotspotController.setHotspotEnabled(enabled)
++            AxPlatformClient.FEATURE_FLASHLIGHT -> {
++                if (flashlightController.hasFlashlight()) flashlightController.setFlashlight(enabled)
++            }
++            AxPlatformClient.FEATURE_LOCATION -> locationController.setLocationEnabled(enabled)
++            AxPlatformClient.FEATURE_ROTATION ->
++                rotationLockController.setRotationLocked(!enabled, TAG)
++            AxPlatformClient.FEATURE_BATTERY_SAVER -> batteryController.setPowerSaveMode(enabled)
++            AxPlatformClient.FEATURE_ZEN ->
++                zenModeController.setZen(if (enabled) 1 else 0, null, TAG)
++            AxPlatformClient.FEATURE_DATA_SAVER -> dataSaverController.setDataSaverEnabled(enabled)
++            AxPlatformClient.FEATURE_AOD ->
++                stateManager.setSecureBool(Settings.Secure.DOZE_ALWAYS_ON, enabled)
++            AxPlatformClient.FEATURE_AIRPLANE_MODE -> {
++                stateManager.setGlobalBool(Settings.Global.AIRPLANE_MODE_ON, enabled)
++                context.sendBroadcastAsUser(
++                    Intent(Intent.ACTION_AIRPLANE_MODE_CHANGED).putExtra("state", enabled),
++                    UserHandle.ALL
++                )
++            }
++            AxPlatformClient.FEATURE_NFC -> nfcAdapter?.let {
++                if (enabled) it.enable() else it.disable()
++            }
++            AxPlatformClient.FEATURE_DARK_MODE -> uiModeManager.setNightModeActivated(enabled)
++            AxPlatformClient.FEATURE_NIGHT_LIGHT ->
++                colorDisplayManager.setNightDisplayActivated(enabled)
++            AxPlatformClient.FEATURE_COLOR_INVERSION ->
++                stateManager.setSecureBool(
++                    Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED, enabled
++                )
++            AxPlatformClient.FEATURE_COLOR_CORRECTION ->
++                stateManager.setSecureBool(
++                    Settings.Secure.ACCESSIBILITY_DISPLAY_DALTONIZER_ENABLED, enabled
++                )
++            AxPlatformClient.FEATURE_REDUCE_BRIGHTNESS ->
++                stateManager.setSecureBool(SETTING_REDUCE_BRIGHT, enabled)
++            AxPlatformClient.FEATURE_ONE_HANDED_MODE ->
++                stateManager.setSecureBool(SETTING_ONE_HANDED, enabled)
++            AxPlatformClient.FEATURE_HEADS_UP ->
++                stateManager.setGlobalBool(
++                    Settings.Global.HEADS_UP_NOTIFICATIONS_ENABLED, enabled
++                )
++            AxPlatformClient.FEATURE_AUTO_SYNC ->
++                ContentResolver.setMasterSyncAutomatically(enabled)
++            AxPlatformClient.FEATURE_CAMERA_PRIVACY ->
++                sensorPrivacyController.setSensorBlocked(
++                    SensorPrivacyManager.Sources.QS_TILE,
++                    SensorPrivacyManager.Sensors.CAMERA,
++                    enabled
++                )
++            AxPlatformClient.FEATURE_MIC_PRIVACY ->
++                sensorPrivacyController.setSensorBlocked(
++                    SensorPrivacyManager.Sources.QS_TILE,
++                    SensorPrivacyManager.Sensors.MICROPHONE,
++                    enabled
++                )
++            AxPlatformClient.FEATURE_WORK_PROFILE ->
++                managedProfileController.setWorkModeEnabled(enabled)
++            AxPlatformClient.FEATURE_USB_TETHER -> tetheringManager?.setUsbTethering(enabled)
++            AxPlatformClient.FEATURE_DREAM -> try {
++                dreamManager?.let { if (enabled) it.dream() else it.awaken() }
++            } catch (e: RemoteException) {
++                Log.w(TAG, "Dream setEnabled failed", e)
++            }
++            AxPlatformClient.FEATURE_POWER_SHARE ->
++                batteryController.setReverseState(enabled)
++            AxPlatformClient.FEATURE_CAFFEINE -> {
++                if (enabled && !wakeLock.isHeld) {
++                    wakeLock.acquire(CAFFEINE_DURATION_MS)
++                } else if (!enabled && wakeLock.isHeld) {
++                    wakeLock.release()
++                }
++                stateManager.broadcastBool(feature, wakeLock.isHeld)
++            }
++            AxPlatformClient.FEATURE_VPN -> {
++                if (!enabled && securityController.isVpnEnabled) {
++                    disconnectPrimaryVpn()
++                }
++            }
++            AxPlatformClient.FEATURE_CAST -> {
++                if (!enabled) {
++                    castController.castDevices.firstOrNull { it.isCasting }
++                        ?.let { castController.stopCasting(it, StopReason.STOP_QS_TILE) }
++                }
++            }
++            AxPlatformClient.FEATURE_SCREEN_RECORD -> {
++                if (!enabled && screenRecordUxController.isRecording) {
++                    screenRecordUxController.stopRecording(StopReason.STOP_QS_TILE)
++                }
++            }
++            AxPlatformClient.FEATURE_SCREENSHOT -> {
++                if (enabled) toggle(feature)
++            }
++            else -> Log.w(TAG, "Unknown setEnabled: $feature")
++        }
++    }
++
++    fun setValue(feature: String, value: Int) {
++        when (feature) {
++            AxPlatformClient.FEATURE_ZEN -> {
++                if (zenModeController.zen != value)
++                    zenModeController.setZen(value, null, TAG)
++            }
++            else -> Log.w(TAG, "Unknown setValue: $feature")
++        }
++    }
++
++    fun performAction(feature: String, param: String) {
++        when (feature) {
++            AxPlatformClient.ACTION_WIFI_CONNECT ->
++                latestAccessPoints
++                    .find { it.getKey() == param || it.getTitle() == param }
++                    ?.let { accessPointController.connect(it) }
++            AxPlatformClient.ACTION_BT_CONNECT ->
++                getAllBluetoothDevices().find { it.getAddress() == param }?.let {
++                    if (it.isConnected()) it.disconnect() else it.connect(true)
++                }
++            // GameSpace passes the game's task id. Recording a single task isn't
++            // wired up here, so offer the regular screen recorder, which can still
++            // be pointed at a single app from its own dialog.
++            AxPlatformClient.ACTION_GAME_RECORD -> toggle(AxPlatformClient.FEATURE_SCREEN_RECORD)
++            else -> Log.w(TAG, "Unknown performAction: $feature")
++        }
++    }
++
++    fun getAllBluetoothDevices(): Collection<CachedBluetoothDevice> =
++        localBluetoothManager?.cachedDeviceManager?.cachedDevicesCopy
++            ?: bluetoothController.connectedDevices
++
++    // AOSPA's SecurityController can't disconnect a VPN, so do what crDroid's does.
++    private fun disconnectPrimaryVpn() {
++        val userId = ActivityManager.getCurrentUser()
++        val config = vpnManager?.getVpnConfig(userId) ?: return
++        val user = if (config.legacy) VpnConfig.LEGACY_VPN else config.user
++        vpnManager.prepareVpn(user, VpnConfig.LEGACY_VPN, userId)
++    }
++
++    companion object {
++        private const val TAG = "AxPlatformFeatureCtrl"
++        private const val CAFFEINE_DURATION_MS = 5L * 60 * 1000
++        private const val SCREENSHOT_DELAY_MS = 500L
++        const val SETTING_NIGHT_DISPLAY = "night_display_activated"
++        const val SETTING_REDUCE_BRIGHT = "reduce_bright_colors_activated"
++        const val SETTING_ONE_HANDED = "one_handed_mode_enabled"
++
++        fun isDarkMode(config: Configuration): Boolean =
++            (config.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
++
++        private val BASE_FEATURES = arrayOf(
++            AxPlatformClient.FEATURE_WIFI,
++            AxPlatformClient.FEATURE_MOBILE_DATA,
++            AxPlatformClient.FEATURE_BLUETOOTH,
++            AxPlatformClient.FEATURE_HOTSPOT,
++            AxPlatformClient.FEATURE_FLASHLIGHT,
++            AxPlatformClient.FEATURE_LOCATION,
++            AxPlatformClient.FEATURE_ROTATION,
++            AxPlatformClient.FEATURE_BATTERY_SAVER,
++            AxPlatformClient.FEATURE_ZEN,
++            AxPlatformClient.FEATURE_AOD,
++            AxPlatformClient.FEATURE_DATA_SAVER,
++            AxPlatformClient.FEATURE_AIRPLANE_MODE,
++            AxPlatformClient.FEATURE_DARK_MODE,
++            AxPlatformClient.FEATURE_NIGHT_LIGHT,
++            AxPlatformClient.FEATURE_COLOR_INVERSION,
++            AxPlatformClient.FEATURE_COLOR_CORRECTION,
++            AxPlatformClient.FEATURE_REDUCE_BRIGHTNESS,
++            AxPlatformClient.FEATURE_ONE_HANDED_MODE,
++            AxPlatformClient.FEATURE_HEADS_UP,
++            AxPlatformClient.FEATURE_AUTO_SYNC
++        )
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureMapper.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureMapper.kt
+new file mode 100644
+index 00000000..578699a9
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureMapper.kt
+@@ -0,0 +1,141 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.content.Context
++import android.os.Bundle
++import com.android.axion.platform.AxPlatformClient
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.res.R
++import com.android.systemui.statusbar.policy.BatteryController
++import com.android.systemui.statusbar.policy.ConfigurationController
++import javax.inject.Inject
++
++@SysUISingleton
++class AxPlatformFeatureMapper @Inject constructor(
++    private val context: Context,
++    private val batteryController: BatteryController,
++    configurationController: ConfigurationController
++) : AxPlatformStateManager.LabelProvider {
++
++    private val labelCache = mutableMapOf<String, String>()
++
++    init {
++        configurationController.addCallback(object : ConfigurationController.ConfigurationListener {
++            override fun onLocaleListChanged() {
++                labelCache.clear()
++            }
++        })
++    }
++
++    override fun getLabel(feature: String): String? {
++        labelCache[feature]?.let { return it }
++        val label = when {
++            FEATURE_LABEL_RES.containsKey(feature) -> context.getString(FEATURE_LABEL_RES[feature]!!)
++            FEATURE_LABELS.containsKey(feature) -> FEATURE_LABELS[feature]!!
++            else -> return null
++        }
++        labelCache[feature] = label
++        return label
++    }
++
++    override fun getSecondaryLabel(feature: String, state: Bundle): String? = when (feature) {
++        AxPlatformClient.FEATURE_WIFI -> {
++            val ssid = state.getString("ssid")
++            when {
++                state.getBoolean("connected") && !ssid.isNullOrEmpty() -> ssid
++                else -> null
++            }
++        }
++        AxPlatformClient.FEATURE_BLUETOOTH -> {
++            @Suppress("DEPRECATION")
++            val devices = state.getParcelableArrayList<Bundle>("devices")
++            devices?.firstOrNull { it.getBoolean("isConnected") }?.getString("name")
++        }
++        AxPlatformClient.FEATURE_HOTSPOT -> {
++            val num = state.getInt("numDevices", 0)
++            if (num > 0) "$num ${if (num == 1) "device" else "devices"}" else null
++        }
++        AxPlatformClient.FEATURE_MOBILE_DATA -> {
++            state.getString("description")?.takeIf { it.isNotEmpty() }
++        }
++        AxPlatformClient.FEATURE_ZEN -> {
++            val mode = state.getInt("mode", 0)
++            if (mode != 0) context.getString(R.string.zen_mode_on) else null
++        }
++        AxPlatformClient.FEATURE_POWER_SHARE -> {
++            if (batteryController.isAodPowerSave) LABEL_POWER_SHARE_OFF_POWERSAVE else null
++        }
++        AxPlatformClient.FEATURE_VPN -> {
++            state.getString("name")?.takeIf { it.isNotEmpty() }
++        }
++        AxPlatformClient.FEATURE_CAST -> {
++            state.getString("deviceName")?.takeIf { it.isNotEmpty() }
++        }
++        AxPlatformClient.FEATURE_SCREEN_RECORD -> {
++            when {
++                state.getBoolean("active") -> context.getString(R.string.quick_settings_screen_record_stop)
++                state.getBoolean("starting") -> context.getString(R.string.quick_settings_screen_record_start)
++                else -> null
++            }
++        }
++        else -> null
++    }
++
++    companion object {
++        private const val LABEL_POWER_SHARE_OFF_POWERSAVE = "Off in battery saver"
++
++        // AOSPA's SystemUI has no strings for these tiles.
++        private val FEATURE_LABELS = mapOf(
++            AxPlatformClient.FEATURE_AOD to "Always on display",
++            AxPlatformClient.FEATURE_AIRPLANE_MODE to "Airplane mode",
++            AxPlatformClient.FEATURE_HEADS_UP to "Heads up",
++            AxPlatformClient.FEATURE_AUTO_SYNC to "Auto sync",
++            AxPlatformClient.FEATURE_USB_TETHER to "USB tethering",
++            AxPlatformClient.FEATURE_POWER_SHARE to "Reverse charging",
++            AxPlatformClient.FEATURE_CAFFEINE to "Caffeine",
++            AxPlatformClient.FEATURE_VPN to "VPN",
++            AxPlatformClient.FEATURE_SCREENSHOT to "Screenshot"
++        )
++
++        private val FEATURE_LABEL_RES = mapOf(
++            AxPlatformClient.FEATURE_WIFI to R.string.quick_settings_wifi_label,
++            AxPlatformClient.FEATURE_MOBILE_DATA to R.string.quick_settings_internet_label,
++            AxPlatformClient.FEATURE_BLUETOOTH to R.string.quick_settings_bluetooth_label,
++            AxPlatformClient.FEATURE_HOTSPOT to R.string.quick_settings_hotspot_label,
++            AxPlatformClient.FEATURE_FLASHLIGHT to R.string.quick_settings_flashlight_label,
++            AxPlatformClient.FEATURE_LOCATION to R.string.quick_settings_location_label,
++            AxPlatformClient.FEATURE_ROTATION to R.string.quick_settings_rotation_unlocked_label,
++            AxPlatformClient.FEATURE_BATTERY_SAVER to R.string.battery_detail_switch_title,
++            AxPlatformClient.FEATURE_ZEN to R.string.quick_settings_dnd_label,
++            AxPlatformClient.FEATURE_DATA_SAVER to R.string.data_saver,
++            AxPlatformClient.FEATURE_NFC to R.string.quick_settings_nfc_label,
++            AxPlatformClient.FEATURE_DARK_MODE to R.string.quick_settings_ui_mode_night_label,
++            AxPlatformClient.FEATURE_NIGHT_LIGHT to R.string.quick_settings_night_display_label,
++            AxPlatformClient.FEATURE_COLOR_INVERSION to R.string.quick_settings_inversion_label,
++            AxPlatformClient.FEATURE_COLOR_CORRECTION to R.string.quick_settings_color_correction_label,
++            AxPlatformClient.FEATURE_REDUCE_BRIGHTNESS to com.android.internal.R.string.reduce_bright_colors_feature_name,
++            AxPlatformClient.FEATURE_ONE_HANDED_MODE to R.string.quick_settings_onehanded_label,
++            AxPlatformClient.FEATURE_CAMERA_PRIVACY to R.string.quick_settings_camera_label,
++            AxPlatformClient.FEATURE_MIC_PRIVACY to R.string.quick_settings_mic_label,
++            AxPlatformClient.FEATURE_WORK_PROFILE to R.string.quick_settings_work_mode_label,
++            AxPlatformClient.FEATURE_DREAM to R.string.start_dreams,
++            AxPlatformClient.FEATURE_CAST to R.string.quick_settings_cast_title,
++            AxPlatformClient.FEATURE_SCREEN_RECORD to R.string.quick_settings_screen_record_label
++        )
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformObservers.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformObservers.kt
+new file mode 100644
+index 00000000..0df4ce8e
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformObservers.kt
+@@ -0,0 +1,816 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.content.BroadcastReceiver
++import android.content.ContentResolver
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.content.res.Configuration
++import android.database.ExecutorContentObserver
++import android.hardware.SensorPrivacyManager
++import android.hardware.usb.UsbManager
++import android.media.MediaMetadata
++import android.media.session.PlaybackState
++import android.nfc.NfcAdapter
++import android.os.Bundle
++import android.os.RemoteException
++import android.os.UserHandle
++import android.provider.Settings
++import android.util.Log
++import com.android.axion.platform.AxPlatformClient
++import com.android.settingslib.bluetooth.LocalBluetoothManager
++import com.android.systemui.broadcast.BroadcastDispatcher
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.util.settings.SecureSettings
++import com.android.systemui.dagger.qualifiers.Application
++import com.android.systemui.dagger.qualifiers.Background
++import com.android.systemui.dagger.qualifiers.Main
++import com.android.systemui.media.NotificationMediaManager
++import com.android.systemui.plugins.statusbar.StatusBarStateController
++import com.android.systemui.screenrecord.ScreenRecordUxController
++import com.android.systemui.statusbar.StatusBarState
++import com.android.systemui.statusbar.connectivity.AccessPointController
++import com.android.systemui.statusbar.connectivity.MobileDataIndicators
++import com.android.systemui.statusbar.connectivity.NetworkController
++import com.android.systemui.statusbar.connectivity.SignalCallback
++import com.android.systemui.statusbar.connectivity.WifiIndicators
++import com.android.systemui.statusbar.phone.ManagedProfileController
++import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryInteractor
++import com.android.systemui.statusbar.policy.BatteryController
++import com.android.systemui.statusbar.policy.BluetoothController
++import com.android.systemui.statusbar.policy.ConfigurationController
++import com.android.systemui.statusbar.policy.DataSaverController
++import com.android.systemui.statusbar.policy.FlashlightController
++import com.android.systemui.statusbar.policy.HotspotController
++import com.android.systemui.statusbar.policy.IndividualSensorPrivacyController
++import com.android.systemui.statusbar.policy.KeyguardStateController
++import com.android.systemui.statusbar.policy.LocationController
++import com.android.systemui.statusbar.policy.NextAlarmController
++import com.android.systemui.statusbar.policy.RotationLockController
++import com.android.systemui.statusbar.policy.CastController
++import com.android.systemui.statusbar.policy.CastDevice
++import com.android.systemui.statusbar.policy.SecurityController
++import com.android.systemui.statusbar.policy.ZenModeController
++import com.android.wifitrackerlib.WifiEntry
++import kotlinx.coroutines.CoroutineDispatcher
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.channels.BufferOverflow
++import kotlinx.coroutines.flow.MutableSharedFlow
++import kotlinx.coroutines.flow.combine
++import kotlinx.coroutines.flow.flowOn
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.util.concurrent.Executor
++import javax.inject.Inject
++
++@SysUISingleton
++class AxPlatformObservers @Inject constructor(
++    private val context: Context,
++    @Main private val mainExecutor: Executor,
++    @Main private val mainDispatcher: CoroutineDispatcher,
++    @Background private val bgDispatcher: CoroutineDispatcher,
++    @Application private val scope: CoroutineScope,
++    private val broadcastDispatcher: BroadcastDispatcher,
++    private val secureSettings: SecureSettings,
++    private val stateManager: AxPlatformStateManager,
++    private val featureController: AxPlatformFeatureController,
++    private val networkController: NetworkController,
++    private val accessPointController: AccessPointController,
++    private val bluetoothController: BluetoothController,
++    private val hotspotController: HotspotController,
++    private val flashlightController: FlashlightController,
++    private val locationController: LocationController,
++    private val rotationLockController: RotationLockController,
++    private val batteryController: BatteryController,
++    private val zenModeController: ZenModeController,
++    private val dataSaverController: DataSaverController,
++    private val localBluetoothManager: LocalBluetoothManager?,
++    private val notificationMediaManager: NotificationMediaManager,
++    private val nextAlarmController: NextAlarmController,
++    private val configurationController: ConfigurationController,
++    private val statusBarStateController: StatusBarStateController,
++    private val keyguardStateController: KeyguardStateController,
++    private val batteryInteractor: BatteryInteractor,
++    private val sensorPrivacyController: IndividualSensorPrivacyController,
++    private val managedProfileController: ManagedProfileController,
++    private val securityController: SecurityController,
++    private val castController: CastController,
++    private val screenRecordUxController: ScreenRecordUxController
++) {
++
++    private var lastMediaState = -1
++    private var lastMediaTrack: String? = null
++    private var lastMediaArtist: String? = null
++    private var lastMediaPackage: String? = null
++    private var lastMobileDataEnabled: Boolean? = null
++
++    private val wifiStateFlow = MutableSharedFlow<Bundle>(
++        replay = 0, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
++    )
++    private val mobileStateFlow = MutableSharedFlow<Bundle>(
++        replay = 0, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST
++    )
++
++    init {
++        scope.launch(bgDispatcher) {
++            wifiStateFlow.collect { bundle ->
++                stateManager.broadcastState(AxPlatformClient.FEATURE_WIFI, bundle)
++            }
++        }
++        scope.launch(bgDispatcher) {
++            mobileStateFlow.collect { bundle ->
++                stateManager.broadcastState(AxPlatformClient.FEATURE_MOBILE_DATA, bundle)
++            }
++        }
++    }
++
++    fun registerAll() {
++        registerControllerCallbacks()
++        registerSettingsObservers()
++        registerNfc()
++        registerBatteryFlow()
++        registerSensorPrivacy()
++        registerWorkProfile()
++        registerUsbTether()
++        registerDream()
++        registerPowerShare()
++        registerCaffeine()
++        registerVpn()
++        registerCast()
++        registerScreenRecord()
++        registerAmbientIndication()
++    }
++
++    private fun registerControllerCallbacks() {
++        networkController.addCallback(signalCallback)
++        bluetoothController.addCallback(bluetoothCallback)
++        hotspotController.addCallback(hotspotCallback)
++        flashlightController.addCallback(flashlightCallback)
++        locationController.addCallback(locationCallback)
++        rotationLockController.addCallback(rotationCallback)
++        batteryController.addCallback(batteryCallback)
++        zenModeController.addCallback(zenCallback)
++        dataSaverController.addCallback(dataSaverCallback)
++        notificationMediaManager.addCallback(mediaListener)
++        nextAlarmController.addCallback(nextAlarmCallback)
++        configurationController.addCallback(configurationListener)
++        statusBarStateController.addCallback(dozeCallback)
++        keyguardStateController.addCallback(keyguardCallback)
++        accessPointController.addAccessPointCallback(accessPointCallback)
++        securityController.addCallback(vpnCallback)
++        castController.addCallback(castCallback)
++    }
++
++    private fun registerSettingsObservers() {
++        stateManager.observeSecure(Settings.Secure.DOZE_ALWAYS_ON, AxPlatformClient.FEATURE_AOD)
++        stateManager.observeSecure(
++            Settings.Secure.ACCESSIBILITY_DISPLAY_INVERSION_ENABLED,
++            AxPlatformClient.FEATURE_COLOR_INVERSION
++        )
++        stateManager.observeSecure(
++            Settings.Secure.ACCESSIBILITY_DISPLAY_DALTONIZER_ENABLED,
++            AxPlatformClient.FEATURE_COLOR_CORRECTION
++        )
++        stateManager.observeSecure(
++            AxPlatformFeatureController.SETTING_REDUCE_BRIGHT,
++            AxPlatformClient.FEATURE_REDUCE_BRIGHTNESS
++        )
++        stateManager.observeSecure(
++            AxPlatformFeatureController.SETTING_NIGHT_DISPLAY,
++            AxPlatformClient.FEATURE_NIGHT_LIGHT
++        )
++        stateManager.observeSecure(
++            AxPlatformFeatureController.SETTING_ONE_HANDED,
++            AxPlatformClient.FEATURE_ONE_HANDED_MODE
++        )
++        stateManager.observeGlobal(
++            Settings.Global.AIRPLANE_MODE_ON,
++            AxPlatformClient.FEATURE_AIRPLANE_MODE
++        )
++        stateManager.observeGlobal(
++            Settings.Global.HEADS_UP_NOTIFICATIONS_ENABLED,
++            AxPlatformClient.FEATURE_HEADS_UP
++        )
++        stateManager.broadcastBool(
++            AxPlatformClient.FEATURE_AUTO_SYNC,
++            ContentResolver.getMasterSyncAutomatically()
++        )
++        ContentResolver.addStatusChangeListener(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS) {
++            mainExecutor.execute {
++                stateManager.broadcastBool(
++                    AxPlatformClient.FEATURE_AUTO_SYNC,
++                    ContentResolver.getMasterSyncAutomatically()
++                )
++            }
++        }
++    }
++
++    private fun registerNfc() {
++        val nfcAdapter = NfcAdapter.getDefaultAdapter(context) ?: return
++        stateManager.broadcastBool(AxPlatformClient.FEATURE_NFC, nfcAdapter.isEnabled)
++        broadcastDispatcher.registerReceiver(object : BroadcastReceiver() {
++            override fun onReceive(ctx: Context, intent: Intent) {
++                stateManager.broadcastBool(AxPlatformClient.FEATURE_NFC, nfcAdapter.isEnabled)
++            }
++        }, IntentFilter(NfcAdapter.ACTION_ADAPTER_STATE_CHANGED))
++    }
++
++    private fun registerBatteryFlow() {
++        scope.launch {
++            combine(
++                batteryInteractor.level,
++                batteryInteractor.isPluggedIn,
++                batteryInteractor.isCharging,
++                batteryInteractor.powerSave,
++                batteryInteractor.batteryTimeRemainingEstimate
++            ) { level, pluggedIn, charging, powerSave, estimate ->
++                Bundle().apply {
++                    putInt("level", level ?: -1)
++                    putBoolean("isPluggedIn", pluggedIn)
++                    putBoolean("isCharging", charging)
++                    putBoolean("powerSave", powerSave)
++                    putString("batteryTimeRemainingEstimate", estimate?.toString() ?: "")
++                }
++            }.flowOn(bgDispatcher).collect { bundle ->
++                withContext(mainDispatcher) {
++                    bundle.putBoolean("wireless", batteryController.isWirelessCharging)
++                    stateManager.broadcastState(AxPlatformClient.KEY_BATTERY, bundle)
++                }
++            }
++        }
++    }
++
++    private fun registerSensorPrivacy() {
++        sensorPrivacyController.addCallback(sensorPrivacyCallback)
++        if (sensorPrivacyController.supportsSensorToggle(SensorPrivacyManager.Sensors.CAMERA)) {
++            stateManager.broadcastBool(
++                AxPlatformClient.FEATURE_CAMERA_PRIVACY,
++                sensorPrivacyController.isSensorBlocked(SensorPrivacyManager.Sensors.CAMERA)
++            )
++        }
++        if (sensorPrivacyController.supportsSensorToggle(SensorPrivacyManager.Sensors.MICROPHONE)) {
++            stateManager.broadcastBool(
++                AxPlatformClient.FEATURE_MIC_PRIVACY,
++                sensorPrivacyController.isSensorBlocked(SensorPrivacyManager.Sensors.MICROPHONE)
++            )
++        }
++    }
++
++    private fun registerWorkProfile() {
++        managedProfileController.addCallback(managedProfileCallback)
++        broadcastWorkProfileState()
++    }
++
++    private fun registerUsbTether() {
++        broadcastDispatcher.registerReceiver(object : BroadcastReceiver() {
++            override fun onReceive(ctx: Context, intent: Intent) {
++                val connected = intent.getBooleanExtra(UsbManager.USB_CONNECTED, false)
++                val rndis = intent.getBooleanExtra(UsbManager.USB_FUNCTION_RNDIS, false)
++                val ncm = intent.getBooleanExtra(UsbManager.USB_FUNCTION_NCM, false)
++                val tethering = rndis || ncm
++                stateManager.broadcastState(
++                    AxPlatformClient.FEATURE_USB_TETHER,
++                    Bundle().apply {
++                        putBoolean("enabled", tethering)
++                        putBoolean("active", tethering)
++                        putBoolean("usbConnected", connected)
++                    }
++                )
++            }
++        }, IntentFilter(UsbManager.ACTION_USB_STATE))
++    }
++
++    private fun registerDream() {
++        featureController.dreamManager ?: return
++        val filter = IntentFilter().apply {
++            addAction(Intent.ACTION_DREAMING_STARTED)
++            addAction(Intent.ACTION_DREAMING_STOPPED)
++        }
++        broadcastDispatcher.registerReceiver(object : BroadcastReceiver() {
++            override fun onReceive(ctx: Context, intent: Intent) {
++                broadcastDreamState()
++            }
++        }, filter)
++        secureSettings.registerContentObserverSync(
++            Settings.Secure.SCREENSAVER_ENABLED,
++            object : ExecutorContentObserver(mainExecutor) {
++                override fun onChange(selfChange: Boolean) {
++                    broadcastDreamState()
++                }
++            }
++        )
++        broadcastDreamState()
++    }
++
++    private fun registerPowerShare() {
++        if (!batteryController.isReverseSupported) return
++        batteryController.addCallback(powerShareCallback)
++        stateManager.broadcastBool(
++            AxPlatformClient.FEATURE_POWER_SHARE,
++            batteryController.isReverseOn
++        )
++    }
++
++    private val signalCallback = object : SignalCallback {
++        override fun setWifiIndicators(wifiIndicators: WifiIndicators) {
++            val connected = wifiIndicators.statusIcon?.visible == true
++            val enabled = wifiIndicators.enabled
++            wifiStateFlow.tryEmit(Bundle().apply {
++                putBoolean("enabled", enabled)
++                putBoolean("active", enabled)
++                putBoolean("connected", connected)
++                putString("ssid", wifiIndicators.description ?: "")
++                putString("statusLabel", wifiIndicators.statusLabel ?: "")
++                putBoolean("isDefault", connected && !wifiIndicators.isTransient)
++            })
++        }
++
++        override fun setMobileDataIndicators(mobileDataIndicators: MobileDataIndicators) {
++            val isEnabled = lastMobileDataEnabled ?: (
++                networkController.mobileDataController?.isMobileDataEnabled == true
++            ).also { lastMobileDataEnabled = it }
++            mobileStateFlow.tryEmit(Bundle().apply {
++                putBoolean("enabled", isEnabled)
++                putBoolean("active", isEnabled)
++                putString(
++                    "type",
++                    mobileDataIndicators.typeContentDescription?.toString() ?: ""
++                )
++                putString("description", mobileDataIndicators.qsDescription?.toString() ?: "")
++                putBoolean("roaming", mobileDataIndicators.roaming)
++                putInt("subId", mobileDataIndicators.subId)
++                putBoolean("activityIn", mobileDataIndicators.activityIn)
++                putBoolean("activityOut", mobileDataIndicators.activityOut)
++            })
++        }
++
++        override fun setMobileDataEnabled(enabled: Boolean) {
++            lastMobileDataEnabled = enabled
++        }
++
++        override fun setNoSims(show: Boolean, simDetected: Boolean) {
++            if (!simDetected) {
++                stateManager.broadcastState(
++                    AxPlatformClient.FEATURE_MOBILE_DATA,
++                    Bundle().apply {
++                        putBoolean("available", false)
++                        putBoolean("enabled", false)
++                        putBoolean("active", false)
++                    }
++                )
++            }
++        }
++    }
++
++    private val accessPointCallback = object : AccessPointController.AccessPointCallback {
++        override fun onAccessPointsChanged(accessPoints: List<WifiEntry>) {
++            featureController.latestAccessPoints = accessPoints.toList()
++            val networks = ArrayList<Bundle>()
++            accessPoints.forEach { ap ->
++                if (ap.getLevel() != -1) {
++                    networks.add(Bundle().apply {
++                        putString("title", ap.getTitle())
++                        putString("key", ap.getKey())
++                        putBoolean("isConnected",
++                            ap.getConnectedState() == WifiEntry.CONNECTED_STATE_CONNECTED)
++                        putBoolean("isSaved", ap.isSaved())
++                        putInt("level", ap.getLevel())
++                        putInt("security", ap.getSecurity())
++                    })
++                }
++            }
++            stateManager.broadcastState(AxPlatformClient.KEY_WIFI_SCAN, Bundle().apply {
++                putParcelableArrayList("networks", networks)
++            })
++        }
++
++        override fun onSettingsActivityTriggered(intent: Intent?) {}
++        override fun onWifiScan(isScan: Boolean) {}
++    }
++
++    private fun getAllBluetoothDevices() = featureController.getAllBluetoothDevices()
++
++    private val bluetoothCallback = object : BluetoothController.Callback {
++        override fun onBluetoothStateChange(enabled: Boolean) = broadcastBluetoothState(enabled)
++        override fun onBluetoothDevicesChanged() =
++            broadcastBluetoothState(bluetoothController.isBluetoothEnabled)
++    }
++
++    private fun broadcastBluetoothState(enabled: Boolean) {
++        val devices = getAllBluetoothDevices()
++        val deviceBundles = ArrayList<Bundle>()
++        devices.forEach { device ->
++            deviceBundles.add(Bundle().apply {
++                putString("name", device.getName())
++                putString("address", device.getAddress())
++                putBoolean("isConnected", device.isConnected())
++                putInt("connectionState", device.getMaxConnectionState())
++                putInt("bondState", device.getBondState())
++                putInt("batteryLevel", device.getBatteryLevel())
++            })
++        }
++        val hasConnected = devices.any { it.isConnected() }
++        stateManager.broadcastState(AxPlatformClient.FEATURE_BLUETOOTH, Bundle().apply {
++            putBoolean("enabled", enabled)
++            putBoolean("active", enabled)
++            putBoolean("hasConnectedDevice", hasConnected)
++            putParcelableArrayList("devices", deviceBundles)
++        })
++    }
++
++    private val hotspotCallback = object : HotspotController.Callback {
++        override fun onHotspotChanged(enabled: Boolean, numDevices: Int) {
++            stateManager.broadcastState(AxPlatformClient.FEATURE_HOTSPOT, Bundle().apply {
++                putBoolean("enabled", enabled)
++                putBoolean("active", enabled)
++                putInt("numDevices", numDevices)
++            })
++        }
++    }
++
++    private val flashlightCallback = object : FlashlightController.FlashlightListener {
++        override fun onFlashlightChanged(enabled: Boolean) {
++            stateManager.broadcastState(AxPlatformClient.FEATURE_FLASHLIGHT, Bundle().apply {
++                putBoolean("enabled", enabled)
++                putBoolean("active", enabled)
++                putBoolean("available", true)
++            })
++        }
++
++        override fun onFlashlightError() {}
++
++        override fun onFlashlightAvailabilityChanged(available: Boolean) {
++            if (!available) {
++                stateManager.broadcastState(AxPlatformClient.FEATURE_FLASHLIGHT, Bundle().apply {
++                    putBoolean("enabled", false)
++                    putBoolean("active", false)
++                    putBoolean("available", false)
++                })
++            }
++        }
++    }
++
++    private val rotationCallback =
++        object : RotationLockController.RotationLockControllerCallback {
++            override fun onRotationLockStateChanged(
++                rotationLocked: Boolean,
++                affordanceVisible: Boolean
++            ) {
++                stateManager.broadcastState(AxPlatformClient.FEATURE_ROTATION, Bundle().apply {
++                    putBoolean("locked", rotationLocked)
++                    putBoolean("active", !rotationLocked)
++                })
++            }
++        }
++
++    private val locationCallback = object : LocationController.LocationChangeCallback {
++        override fun onLocationSettingsChanged(locationEnabled: Boolean) {
++            stateManager.broadcastBool(AxPlatformClient.FEATURE_LOCATION, locationEnabled)
++        }
++    }
++
++    private val batteryCallback = object : BatteryController.BatteryStateChangeCallback {
++        override fun onPowerSaveChanged(isPowerSave: Boolean) {
++            stateManager.broadcastBool(AxPlatformClient.FEATURE_BATTERY_SAVER, isPowerSave)
++        }
++    }
++
++    private val zenCallback = object : ZenModeController.Callback {
++        override fun onZenChanged(zen: Int) {
++            stateManager.broadcastState(AxPlatformClient.FEATURE_ZEN, Bundle().apply {
++                putInt("mode", zen)
++                putBoolean("active", zen != 0)
++            })
++        }
++    }
++
++    private val dataSaverCallback = object : DataSaverController.Listener {
++        override fun onDataSaverChanged(isDataSaving: Boolean) {
++            stateManager.broadcastBool(AxPlatformClient.FEATURE_DATA_SAVER, isDataSaving)
++        }
++    }
++
++    private val sensorPrivacyCallback =
++        object : IndividualSensorPrivacyController.Callback {
++            override fun onSensorBlockedChanged(sensor: Int, blocked: Boolean) {
++                when (sensor) {
++                    SensorPrivacyManager.Sensors.CAMERA ->
++                        stateManager.broadcastBool(
++                            AxPlatformClient.FEATURE_CAMERA_PRIVACY, blocked
++                        )
++                    SensorPrivacyManager.Sensors.MICROPHONE ->
++                        stateManager.broadcastBool(
++                            AxPlatformClient.FEATURE_MIC_PRIVACY, blocked
++                        )
++                }
++            }
++        }
++
++    private val managedProfileCallback = object : ManagedProfileController.Callback {
++        override fun onManagedProfileChanged() = broadcastWorkProfileState()
++        override fun onManagedProfileRemoved() {
++            stateManager.broadcastState(
++                AxPlatformClient.FEATURE_WORK_PROFILE,
++                Bundle().apply {
++                    putBoolean("enabled", false)
++                    putBoolean("active", false)
++                    putBoolean("available", false)
++                }
++            )
++        }
++    }
++
++    private fun broadcastWorkProfileState() {
++        val hasProfile = managedProfileController.hasActiveProfile()
++        val enabled = hasProfile && managedProfileController.isWorkModeEnabled
++        stateManager.broadcastState(
++            AxPlatformClient.FEATURE_WORK_PROFILE,
++            Bundle().apply {
++                putBoolean("enabled", enabled)
++                putBoolean("active", enabled)
++                putBoolean("available", hasProfile)
++            }
++        )
++    }
++
++    private fun broadcastDreamState() {
++        val isDreaming = try {
++            featureController.dreamManager?.isDreaming == true
++        } catch (e: RemoteException) { false }
++        val isEnabled = stateManager.getSecureBool(Settings.Secure.SCREENSAVER_ENABLED)
++        stateManager.broadcastState(
++            AxPlatformClient.FEATURE_DREAM,
++            Bundle().apply {
++                putBoolean("enabled", isEnabled)
++                putBoolean("active", isDreaming)
++            }
++        )
++    }
++
++    private val powerShareCallback = object : BatteryController.BatteryStateChangeCallback {
++        override fun onReverseChanged(isReverse: Boolean, level: Int, name: String?) {
++            stateManager.broadcastState(
++                AxPlatformClient.FEATURE_POWER_SHARE,
++                Bundle().apply {
++                    putBoolean("enabled", isReverse)
++                    putBoolean("active", isReverse)
++                }
++            )
++        }
++    }
++
++    private val mediaListener = object : NotificationMediaManager.MediaListener {
++        override fun onPrimaryMetadataOrStateChanged(
++            metadata: MediaMetadata?,
++            @PlaybackState.State state: Int
++        ) {
++            val isPlaying = state == PlaybackState.STATE_PLAYING
++            val packageName = notificationMediaManager.mediaNotificationKey
++                ?.split("|")?.getOrNull(1) ?: ""
++            val track = metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
++                ?: metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
++            val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
++
++            if (state == lastMediaState && track == lastMediaTrack
++                && artist == lastMediaArtist && packageName == lastMediaPackage) return
++
++            lastMediaState = state
++            lastMediaTrack = track
++            lastMediaArtist = artist
++            lastMediaPackage = packageName
++
++            stateManager.broadcastState(AxPlatformClient.KEY_MEDIA, Bundle().apply {
++                putString("track", track)
++                putString("artist", artist)
++                putString("album", metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: "")
++                putBoolean("isPlaying", isPlaying)
++                putInt("state", state)
++                putLong("duration", metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L)
++                putString("packageName", packageName)
++            })
++        }
++    }
++
++    private val nextAlarmCallback = NextAlarmController.NextAlarmChangeCallback { alarm ->
++        if (alarm != null) {
++            stateManager.broadcastState(AxPlatformClient.KEY_ALARM, Bundle().apply {
++                putLong("triggerTime", alarm.triggerTime)
++                putString("packageName", alarm.showIntent?.creatorPackage ?: "")
++            })
++        } else {
++            stateManager.broadcastState(AxPlatformClient.KEY_ALARM, Bundle())
++        }
++    }
++
++    private val configurationListener = object : ConfigurationController.ConfigurationListener {
++        override fun onConfigChanged(newConfig: Configuration) = exportConfigInfo(newConfig)
++        override fun onDensityOrFontScaleChanged() = exportConfigInfo(null)
++        override fun onUiModeChanged() {
++            exportConfigInfo(null)
++            val config = context.resources.configuration
++            stateManager.broadcastBool(
++                AxPlatformClient.FEATURE_DARK_MODE,
++                AxPlatformFeatureController.isDarkMode(config)
++            )
++        }
++        override fun onThemeChanged() = exportConfigInfo(null)
++        override fun onLocaleListChanged() = exportConfigInfo(null)
++        override fun onLayoutDirectionChanged(isLayoutRtl: Boolean) = exportConfigInfo(null)
++        override fun onOrientationChanged(orientation: Int) = exportConfigInfo(null)
++    }
++
++    private fun exportConfigInfo(config: Configuration?) {
++        val currentConfig = config ?: context.resources.configuration
++        stateManager.broadcastState(AxPlatformClient.KEY_CONFIG, Bundle().apply {
++            putInt("uiMode", currentConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK)
++            putBoolean("isDarkMode", AxPlatformFeatureController.isDarkMode(currentConfig))
++            putInt("orientation", currentConfig.orientation)
++            putFloat("fontScale", currentConfig.fontScale)
++            putInt("densityDpi", currentConfig.densityDpi)
++            putInt("smallestScreenWidthDp", currentConfig.smallestScreenWidthDp)
++            putInt("screenWidthDp", currentConfig.screenWidthDp)
++            putInt("screenHeightDp", currentConfig.screenHeightDp)
++            putString("locale", currentConfig.locales.get(0)?.toLanguageTag() ?: "")
++            putInt("layoutDirection", currentConfig.layoutDirection)
++        })
++    }
++
++    private val dozeCallback = object : StatusBarStateController.StateListener {
++        override fun onStateChanged(newState: Int) = exportKeyguardInfo()
++        override fun onDozingChanged(isDozing: Boolean) = exportDozeInfo()
++        override fun onPulsingChanged(pulsing: Boolean) = exportDozeInfo()
++        override fun onDozeAmountChanged(linear: Float, eased: Float) = exportDozeInfo()
++    }
++
++    private val keyguardCallback = object : KeyguardStateController.Callback {
++        override fun onKeyguardGoingAwayChanged() = exportKeyguardInfo()
++        override fun onKeyguardShowingChanged() = exportKeyguardInfo()
++    }
++
++    private fun exportKeyguardInfo() {
++        val state = statusBarStateController.state
++        stateManager.broadcastState(AxPlatformClient.KEY_KEYGUARD, Bundle().apply {
++            putInt("state", state)
++            putBoolean("isKeyguard", state == StatusBarState.KEYGUARD)
++            putBoolean("isUnlocked", state == StatusBarState.SHADE)
++            putBoolean("isShadeLocked", state == StatusBarState.SHADE_LOCKED)
++            putBoolean("isShowing", keyguardStateController.isShowing)
++            putBoolean("isGoingAway", keyguardStateController.isKeyguardGoingAway)
++        })
++    }
++
++    private fun exportDozeInfo() {
++        val aodEnabled = stateManager.getState(AxPlatformClient.FEATURE_AOD).getBoolean("enabled", false)
++        stateManager.broadcastState(AxPlatformClient.KEY_DOZE, Bundle().apply {
++            putBoolean("isDozing", statusBarStateController.isDozing)
++            putBoolean("isPulsing", statusBarStateController.isPulsing)
++            putFloat("dozeAmount", statusBarStateController.dozeAmount)
++            putBoolean("aodEnabled", aodEnabled)
++            putBoolean("isAodPowerSave", batteryController.isAodPowerSave)
++        })
++    }
++
++    private fun registerCaffeine() {
++        stateManager.broadcastBool(
++            AxPlatformClient.FEATURE_CAFFEINE,
++            featureController.wakeLock.isHeld
++        )
++        broadcastDispatcher.registerReceiver(object : BroadcastReceiver() {
++            override fun onReceive(ctx: Context, intent: Intent) {
++                if (featureController.wakeLock.isHeld) {
++                    featureController.wakeLock.release()
++                    stateManager.broadcastBool(AxPlatformClient.FEATURE_CAFFEINE, false)
++                }
++            }
++        }, IntentFilter(Intent.ACTION_SCREEN_OFF))
++    }
++
++    private val vpnCallback = object : SecurityController.SecurityControllerCallback {
++        override fun onStateChanged() {
++            stateManager.broadcastState(
++                AxPlatformClient.FEATURE_VPN,
++                Bundle().apply {
++                    val enabled = securityController.isVpnEnabled
++                    putBoolean("enabled", enabled)
++                    putBoolean("active", enabled)
++                    putString("name", securityController.primaryVpnName ?: "")
++                }
++            )
++        }
++    }
++
++    private fun registerVpn() {
++        stateManager.broadcastState(
++            AxPlatformClient.FEATURE_VPN,
++            Bundle().apply {
++                val enabled = securityController.isVpnEnabled
++                putBoolean("enabled", enabled)
++                putBoolean("active", enabled)
++                putString("name", securityController.primaryVpnName ?: "")
++            }
++        )
++    }
++
++    private val castCallback = object : CastController.Callback {
++        override fun onCastDevicesChanged() = broadcastCastState()
++    }
++
++    private fun registerCast() {
++        broadcastCastState()
++    }
++
++    private fun broadcastCastState() {
++        val devices = castController.castDevices
++        val active = devices.any { it.state == CastDevice.CastState.Connected }
++        val connecting = devices.any { it.state == CastDevice.CastState.Connecting }
++        val activeName = devices.firstOrNull { it.isCasting }?.name
++        stateManager.broadcastState(
++            AxPlatformClient.FEATURE_CAST,
++            Bundle().apply {
++                putBoolean("enabled", active || connecting)
++                putBoolean("active", active)
++                putBoolean("connecting", connecting)
++                putString("deviceName", activeName ?: "")
++            }
++        )
++    }
++
++    private val screenRecordCallback = object : ScreenRecordUxController.StateChangeCallback {
++        override fun onCountdown(millisUntilFinished: Long) = broadcastScreenRecordState()
++        override fun onCountdownEnd() = broadcastScreenRecordState()
++        override fun onRecordingStart() = broadcastScreenRecordState()
++        override fun onRecordingEnd() = broadcastScreenRecordState()
++    }
++
++    private fun registerScreenRecord() {
++        screenRecordUxController.addCallback(screenRecordCallback)
++        broadcastScreenRecordState()
++    }
++
++    private fun broadcastScreenRecordState() {
++        val recording = screenRecordUxController.isRecording
++        val starting = screenRecordUxController.isStarting
++        stateManager.broadcastState(
++            AxPlatformClient.FEATURE_SCREEN_RECORD,
++            Bundle().apply {
++                putBoolean("enabled", recording || starting)
++                putBoolean("active", recording)
++                putBoolean("starting", starting)
++            }
++        )
++    }
++
++    private fun registerAmbientIndication() {
++        val filter = IntentFilter().apply {
++            addAction(ACTION_AMBIENT_SHOW)
++            addAction(ACTION_AMBIENT_EXPAND)
++            addAction(ACTION_AMBIENT_HIDE)
++        }
++        context.registerReceiverAsUser(
++            object : BroadcastReceiver() {
++                override fun onReceive(ctx: Context, intent: Intent) {
++                    val action = intent.action ?: return
++                    val bundle = Bundle().apply {
++                        putString("action", action)
++                        intent.extras?.let { putAll(it) }
++                    }
++                    stateManager.broadcastState(AxPlatformClient.KEY_NOW_PLAYING, bundle)
++                }
++            },
++            UserHandle.ALL,
++            filter,
++            PERMISSION_AMBIENT_INDICATION,
++            null,
++            Context.RECEIVER_EXPORTED,
++        )
++    }
++
++    companion object {
++        private const val TAG = "AxPlatformObservers"
++
++        private const val ACTION_AMBIENT_SHOW =
++            "com.google.android.ambientindication.action.AMBIENT_INDICATION_SHOW"
++        private const val ACTION_AMBIENT_EXPAND =
++            "com.google.android.ambientindication.action.AMBIENT_INDICATION_EXPAND"
++        private const val ACTION_AMBIENT_HIDE =
++            "com.google.android.ambientindication.action.AMBIENT_INDICATION_HIDE"
++        private const val PERMISSION_AMBIENT_INDICATION =
++            "com.google.android.ambientindication.permission.AMBIENT_INDICATION"
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformServiceImpl.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformServiceImpl.kt
+new file mode 100644
+index 00000000..6cbae666
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformServiceImpl.kt
+@@ -0,0 +1,122 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.content.Context
++import android.os.Binder
++import android.os.Bundle
++import android.os.IBinder
++import android.os.Process
++import android.util.Log
++import com.android.axion.platform.IAxPlatformCallback
++import com.android.axion.platform.IAxPlatformService
++import com.android.systemui.CoreStartable
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.dagger.qualifiers.Application
++import com.android.systemui.dagger.qualifiers.Main
++import kotlinx.coroutines.CoroutineDispatcher
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
++import javax.inject.Inject
++
++@SysUISingleton
++class AxPlatformServiceImpl @Inject constructor(
++    private val context: Context,
++    @Main private val mainDispatcher: CoroutineDispatcher,
++    @Application private val scope: CoroutineScope,
++    private val stateManager: AxPlatformStateManager,
++    private val featureController: AxPlatformFeatureController,
++    private val featureMapper: AxPlatformFeatureMapper,
++    private val observers: AxPlatformObservers
++) : CoreStartable {
++
++    private val binderStub = object : IAxPlatformService.Stub() {
++
++        override fun toggle(feature: String?) {
++            enforceSystemCaller()
++            if (feature.isNullOrEmpty()) return
++            scope.launch(mainDispatcher) { featureController.toggle(feature) }
++        }
++
++        override fun setEnabled(feature: String?, enabled: Boolean) {
++            enforceSystemCaller()
++            if (feature.isNullOrEmpty()) return
++            scope.launch(mainDispatcher) { featureController.setEnabled(feature, enabled) }
++        }
++
++        override fun setValue(feature: String?, value: Int) {
++            enforceSystemCaller()
++            if (feature.isNullOrEmpty()) return
++            scope.launch(mainDispatcher) { featureController.setValue(feature, value) }
++        }
++
++        override fun performAction(feature: String?, param: String?) {
++            enforceSystemCaller()
++            if (feature.isNullOrEmpty() || param.isNullOrEmpty()) return
++            scope.launch(mainDispatcher) { featureController.performAction(feature, param) }
++        }
++
++        override fun getState(feature: String?): Bundle =
++            if (feature != null) stateManager.getState(feature) else Bundle.EMPTY
++
++        override fun getAllStates(): Bundle = stateManager.getAllStates()
++
++        override fun getSupportedFeatures(): Array<String> = featureController.supportedFeatures
++
++        override fun registerCallback(callback: IAxPlatformCallback?) {
++            callback?.let { stateManager.registerCallback(it) }
++        }
++
++        override fun unregisterCallback(callback: IAxPlatformCallback?) {
++            callback?.let { stateManager.unregisterCallback(it) }
++        }
++    }
++
++    override fun start() {
++        stateManager.supportedFeatures = featureController.supportedFeatures
++        stateManager.labelProvider = featureMapper
++        sBinder = binderStub
++        Log.i(TAG, "AxPlatform service ready")
++        observers.registerAll()
++    }
++
++    private fun enforceSystemCaller() {
++        val uid = Binder.getCallingUid()
++        if (uid == Process.SYSTEM_UID || uid == Process.myUid()) return
++        val token = Binder.clearCallingIdentity()
++        try {
++            val packages = context.packageManager.getPackagesForUid(uid)
++            val allowed = packages?.any {
++                it.startsWith("com.android.axion.") ||
++                    it == "com.android.systemui" ||
++                    it == "io.chaldeaprjkt.gamespace" ||
++                    it == "com.ireddragonicy.gamespace"
++            } == true
++            if (!allowed) {
++                throw SecurityException("AxPlatformService: caller uid=$uid not permitted")
++            }
++        } finally {
++            Binder.restoreCallingIdentity(token)
++        }
++    }
++
++    companion object {
++        private const val TAG = "AxPlatformService"
++        @Volatile
++        internal var sBinder: IBinder? = null
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/ax/AxPlatformStateManager.kt b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformStateManager.kt
+new file mode 100644
+index 00000000..1ac9e9f1
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformStateManager.kt
+@@ -0,0 +1,197 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.ax
++
++import android.database.ExecutorContentObserver
++import android.os.Binder
++import android.os.Bundle
++import android.os.RemoteCallbackList
++import android.os.RemoteException
++import android.os.UserHandle
++import android.util.Log
++import com.android.axion.platform.AxPlatformClient
++import com.android.axion.platform.IAxPlatformCallback
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.dagger.qualifiers.Main
++import com.android.systemui.util.settings.GlobalSettings
++import com.android.systemui.util.settings.SecureSettings
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.Executor
++import javax.inject.Inject
++
++@SysUISingleton
++class AxPlatformStateManager @Inject constructor(
++    private val secureSettings: SecureSettings,
++    private val globalSettings: GlobalSettings,
++    @Main private val mainExecutor: Executor
++) {
++
++    interface LabelProvider {
++        fun getLabel(feature: String): String?
++        fun getSecondaryLabel(feature: String, state: Bundle): String?
++    }
++
++    private val callbacks = RemoteCallbackList<IAxPlatformCallback>()
++    private val stateCache = ConcurrentHashMap<String, Bundle>()
++
++    var labelProvider: LabelProvider? = null
++    var supportedFeatures: Array<String> = emptyArray()
++        internal set
++
++    fun getState(feature: String): Bundle = stateCache[feature] ?: Bundle.EMPTY
++
++    fun getAllStates(): Bundle = Bundle().also { result ->
++        stateCache.forEach { (key, bundle) -> result.putBundle(key, bundle) }
++    }
++
++    fun registerCallback(callback: IAxPlatformCallback) {
++        callbacks.register(callback)
++        stateCache.forEach { (key, bundle) ->
++            try {
++                callback.onStateChanged(key, bundle)
++            } catch (e: RemoteException) {
++                Log.w(TAG, "Failed to send initial state for key=$key", e)
++            }
++        }
++    }
++
++    fun unregisterCallback(callback: IAxPlatformCallback) {
++        callbacks.unregister(callback)
++    }
++
++    fun broadcastState(key: String, state: Bundle) {
++        val normalizedState = Bundle(state)
++        enrichBundle(key, normalizedState)
++        val oldState = stateCache[key]
++        if (oldState != null && bundlesEqual(oldState, normalizedState)) {
++            return
++        }
++        stateCache[key] = normalizedState
++        synchronized(callbacks) {
++            val count = callbacks.beginBroadcast()
++            for (i in 0 until count) {
++                try {
++                    callbacks.getBroadcastItem(i).onStateChanged(key, normalizedState)
++                } catch (e: RemoteException) {
++                    Log.w(TAG, "Callback failed for key=$key", e)
++                }
++            }
++            callbacks.finishBroadcast()
++        }
++    }
++
++    fun broadcastBool(feature: String, active: Boolean) {
++        broadcastState(feature, Bundle().apply {
++            putBoolean("enabled", active)
++            putBoolean("active", active)
++        })
++    }
++
++    private fun enrichBundle(key: String, state: Bundle) {
++        if (state === Bundle.EMPTY) return
++        if (!state.containsKey("tileState")) {
++            state.putInt("tileState", when {
++                !state.getBoolean("available", true) -> AxPlatformClient.TILE_STATE_UNAVAILABLE
++                state.getBoolean("active", false) -> AxPlatformClient.TILE_STATE_ACTIVE
++                else -> AxPlatformClient.TILE_STATE_INACTIVE
++            })
++        }
++        labelProvider?.let { provider ->
++            if (!state.containsKey("label")) {
++                provider.getLabel(key)?.let { state.putString("label", it) }
++            }
++            if (!state.containsKey("secondaryLabel")) {
++                provider.getSecondaryLabel(key, state)?.let {
++                    state.putString("secondaryLabel", it)
++                }
++            }
++        }
++    }
++
++    private fun bundlesEqual(first: Bundle, second: Bundle): Boolean {
++        if (first.size() != second.size()) return false
++        for (key in first.keySet()) {
++            if (!second.containsKey(key)) return false
++            if (!bundleValueEquals(first.get(key), second.get(key))) return false
++        }
++        return true
++    }
++
++    private fun bundleValueEquals(first: Any?, second: Any?): Boolean =
++        when {
++            first is Bundle && second is Bundle -> bundlesEqual(first, second)
++            first is IntArray && second is IntArray -> first.contentEquals(second)
++            first is LongArray && second is LongArray -> first.contentEquals(second)
++            first is BooleanArray && second is BooleanArray -> first.contentEquals(second)
++            first is Array<*> && second is Array<*> -> first.contentDeepEquals(second)
++            else -> first == second
++        }
++
++    fun getSecureBool(key: String, def: Boolean = false): Boolean =
++        secureSettings.getIntForUser(key, if (def) 1 else 0, UserHandle.USER_CURRENT) == 1
++
++    fun setSecureBool(key: String, value: Boolean) {
++        val token = Binder.clearCallingIdentity()
++        try {
++            secureSettings.putIntForUser(key, if (value) 1 else 0, UserHandle.USER_CURRENT)
++        } finally {
++            Binder.restoreCallingIdentity(token)
++        }
++    }
++
++    fun toggleSecure(key: String) = setSecureBool(key, !getSecureBool(key))
++
++    fun getGlobalBool(key: String, def: Boolean = false): Boolean =
++        globalSettings.getInt(key, if (def) 1 else 0) == 1
++
++    fun setGlobalBool(key: String, value: Boolean) {
++        val token = Binder.clearCallingIdentity()
++        try {
++            globalSettings.putInt(key, if (value) 1 else 0)
++        } finally {
++            Binder.restoreCallingIdentity(token)
++        }
++    }
++
++    fun toggleGlobal(key: String) = setGlobalBool(key, !getGlobalBool(key))
++
++    fun observeSecure(key: String, feature: String) {
++        secureSettings.registerContentObserverSync(
++            key, object : ExecutorContentObserver(mainExecutor) {
++                override fun onChange(selfChange: Boolean) {
++                    broadcastBool(feature, getSecureBool(key))
++                }
++            }
++        )
++        broadcastBool(feature, getSecureBool(key))
++    }
++
++    fun observeGlobal(key: String, feature: String) {
++        globalSettings.registerContentObserverSync(
++            key, object : ExecutorContentObserver(mainExecutor) {
++                override fun onChange(selfChange: Boolean) {
++                    broadcastBool(feature, getGlobalBool(key))
++                }
++            }
++        )
++        broadcastBool(feature, getGlobalBool(key))
++    }
++
++    companion object {
++        private const val TAG = "AxPlatformState"
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/dagger/SystemUICoreStartableModule.kt b/packages/SystemUI/src/com/android/systemui/dagger/SystemUICoreStartableModule.kt
+index 6463529a..af046311 100644
+--- a/packages/SystemUI/src/com/android/systemui/dagger/SystemUICoreStartableModule.kt
++++ b/packages/SystemUI/src/com/android/systemui/dagger/SystemUICoreStartableModule.kt
+@@ -21,6 +21,7 @@ import com.android.systemui.CoreStartable
+ import com.android.systemui.LatencyTester
+ import com.android.systemui.SliceBroadcastRelayHandler
+ import com.android.systemui.accessibility.Magnification
++import com.android.systemui.ax.AxPlatformServiceImpl
+ import com.android.systemui.back.domain.interactor.BackActionInteractor
+ import com.android.systemui.biometrics.BiometricNotificationService
+ import com.android.systemui.bouncer.domain.startable.BouncerStartable
+@@ -323,6 +324,12 @@ abstract class SystemUICoreStartableModule {
+     @ClassKey(ComplicationTypesUpdater::class)
+     abstract fun bindComplicationTypesUpdater(updater: ComplicationTypesUpdater): CoreStartable
+ 
++    /** Inject into AxPlatformServiceImpl, the platform service GameSpace binds to. */
++    @Binds
++    @IntoMap
++    @ClassKey(AxPlatformServiceImpl::class)
++    abstract fun bindAxPlatformService(impl: AxPlatformServiceImpl): CoreStartable
++
+     @Binds
+     @IntoMap
+     @ClassKey(SysUIKeyGestureEventInitializer::class)
+-- 
+2.43.0
+

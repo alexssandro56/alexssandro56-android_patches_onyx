@@ -1,0 +1,3 @@
+# GameSpaceService stages AFME for the focused game and bypass charging
+set_prop(system_server, afme_prop)
+set_prop(system_server, gamespace_prop)

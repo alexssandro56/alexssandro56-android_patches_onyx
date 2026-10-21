@@ -1,0 +1,207 @@
+From 084d5a59315da47c439d5e1d96ecfec375e2bdc3 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Wed, 21 Oct 2026 23:43:39 +0000
+Subject: [PATCH] EGL/Vulkan: Load the AFME layers into the armed game
+
+AFME (Adreno Frame Motion Engine, IRedDragonICY) is GPU frame generation
+shipped as two graphics layers in /system_ext/lib{,64}/afme. GameSpace
+arms it for one game at a time: persist.sys.afme.enable turns it on and
+persist.sys.afme.app names the game.
+
+When the process name matches, append libAFME_layer.so to the GLES
+debug layers and VK_LAYER_AFME_frame_gen to the implicit Vulkan layers,
+and load them from the AFME directory with dlopen, outside the app's
+linker namespace, like the other platform layers. Debug layers keep
+working as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ opengl/libs/EGL/egl_layers.cpp         | 35 +++++++++++++++++++++++++-
+ vulkan/libvulkan/api.cpp               |  8 ++++++
+ vulkan/libvulkan/layers_extensions.cpp | 35 +++++++++++++++++++++++++-
+ vulkan/libvulkan/layers_extensions.h   |  1 +
+ 4 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/opengl/libs/EGL/egl_layers.cpp b/opengl/libs/EGL/egl_layers.cpp
+index fe99374..504fc91 100644
+--- a/opengl/libs/EGL/egl_layers.cpp
++++ b/opengl/libs/EGL/egl_layers.cpp
+@@ -173,6 +173,29 @@ LayerLoader& LayerLoader::getInstance() {
+ 
+ const char kSystemLayerLibraryDir[] = "/data/local/debug/gles";
+ 
++// AFME (Adreno Frame Motion Engine) frame generation layer. GameSpace arms it
++// for one game at a time: persist.sys.afme.enable turns it on and
++// persist.sys.afme.app names the game, which GameSpaceService publishes as
++// soon as the game gets focus, before its process draws.
++#if defined(__LP64__)
++const char kAfmeLayerLibraryDir[] = "/system_ext/lib64/afme";
++#else
++const char kAfmeLayerLibraryDir[] = "/system_ext/lib/afme";
++#endif
++const char kAfmeLayerName[] = "libAFME_layer.so";
++
++// Not cached: the Zygote also runs this when it preloads the driver, and its
++// children must decide again under their own process name.
++static bool IsAfmeArmed() {
++    if (!base::GetBoolProperty("persist.sys.afme.enable", false)) return false;
++    const std::string app = base::GetProperty("persist.sys.afme.app", "");
++    if (app.empty()) return false;
++    std::string cmdline;
++    if (!base::ReadFileToString("/proc/self/cmdline", &cmdline)) return false;
++    const std::string process(cmdline.c_str());
++    return process == app || base::StartsWith(process, app + ":");
++}
++
+ std::string LayerLoader::GetDebugLayers() {
+     // Layers can be specified at the Java level in GraphicsEnvironment
+     // gpu_debug_layers_gles = layer1:layer2:layerN
+@@ -189,6 +212,11 @@ std::string LayerLoader::GetDebugLayers() {
+     }
+ #endif
+ 
++    if (IsAfmeArmed()) {
++        debug_layers = debug_layers.empty() ? kAfmeLayerName
++                                            : debug_layers + ":" + kAfmeLayerName;
++    }
++
+     return debug_layers;
+ }
+ 
+@@ -384,6 +412,10 @@ void LayerLoader::LoadLayers() {
+             paths.insert(it, system_path);
+         }
+ 
++        if (layers[i] == kAfmeLayerName && IsAfmeArmed()) {
++            paths.insert(paths.begin(), kAfmeLayerLibraryDir);
++        }
++
+         bool layer_found = false;
+         for (uint32_t j = 0; j < paths.size() && !layer_found; j++) {
+             std::string layer;
+@@ -407,7 +439,8 @@ void LayerLoader::LoadLayers() {
+                 // can't safely use libc++_shared, for example. Which is one reason
+                 // (among several) we only allow them in non-user builds.
+                 auto app_namespace = android::GraphicsEnv::getInstance().getAppNamespace();
+-                if (app_namespace && !android::base::StartsWith(layer, kSystemLayerLibraryDir)) {
++                if (app_namespace && !android::base::StartsWith(layer, kSystemLayerLibraryDir) &&
++                    !android::base::StartsWith(layer, kAfmeLayerLibraryDir)) {
+                     char* error_message = nullptr;
+                     dlhandle_ = OpenNativeLibraryInNamespace(app_namespace, layer.c_str(),
+                                                              &native_bridge_, &error_message);
+diff --git a/vulkan/libvulkan/api.cpp b/vulkan/libvulkan/api.cpp
+index 893bb0f..9bdc147 100644
+--- a/vulkan/libvulkan/api.cpp
++++ b/vulkan/libvulkan/api.cpp
+@@ -27,6 +27,7 @@
+ #include <string.h>
+ 
+ #include <algorithm>
++#include <climits>
+ #include <mutex>
+ #include <new>
+ #include <string>
+@@ -170,6 +171,13 @@ class OverrideLayerNames {
+                           return (a.priority < b.priority);
+                       });
+         }
++
++        // AFME frame generation, armed by GameSpace. DiscoverLayers() only
++        // found the layer if it was armed when this process started, and a
++        // missing implicit layer would fail vkCreateInstance.
++        static const char kAfmeLayerName[] = "VK_LAYER_AFME_frame_gen";
++        if (FindLayer(kAfmeLayerName) && !IsImplicitLayer(kAfmeLayerName))
++            AddImplicitLayer(INT_MAX, kAfmeLayerName, strlen(kAfmeLayerName));
+     }
+ 
+     void GetLayersFromSettings() {
+diff --git a/vulkan/libvulkan/layers_extensions.cpp b/vulkan/libvulkan/layers_extensions.cpp
+index 2b07fd1..7036d5d 100644
+--- a/vulkan/libvulkan/layers_extensions.cpp
++++ b/vulkan/libvulkan/layers_extensions.cpp
+@@ -30,6 +30,8 @@
+ #include <vector>
+ 
+ #include <android/dlext.h>
++#include <android-base/file.h>
++#include <android-base/properties.h>
+ #include <android-base/strings.h>
+ #include <cutils/properties.h>
+ #include <graphicsenv/GraphicsEnv.h>
+@@ -88,6 +90,13 @@ const char kSystemPlatformLayerLibraryDir[] = "/system/lib/vulkan";
+ const char kSystemOEMLayerLibraryDir[] = "/product/lib/vulkan";
+ #endif
+ 
++// AFME (Adreno Frame Motion Engine) frame generation layer, see IsAfmeArmed().
++#if defined(__LP64__)
++const char kAfmeLayerLibraryDir[] = "/system_ext/lib64/afme";
++#else
++const char kAfmeLayerLibraryDir[] = "/system_ext/lib/afme";
++#endif
++
+ class LayerLibrary {
+    public:
+     explicit LayerLibrary(const std::string& path,
+@@ -163,7 +172,8 @@ bool LayerLibrary::Open() {
+             !(android::base::StartsWith(path_, kSystemDebugLayerLibraryDir) ||
+               android::base::StartsWith(path_,
+                                         kSystemPlatformLayerLibraryDir) ||
+-              android::base::StartsWith(path_, kSystemOEMLayerLibraryDir))) {
++              android::base::StartsWith(path_, kSystemOEMLayerLibraryDir) ||
++              android::base::StartsWith(path_, kAfmeLayerLibraryDir))) {
+             char* error_msg = nullptr;
+             dlhandle_ = android::OpenNativeLibraryInNamespace(
+                 app_namespace, path_.c_str(), &native_bridge_, &error_msg);
+@@ -535,6 +545,24 @@ void* GetLayerGetProcAddr(const Layer& layer,
+ 
+ }  // anonymous namespace
+ 
++/* GameSpace arms AFME for one game at a time: persist.sys.afme.enable turns it
++ * on and persist.sys.afme.app names the game, which GameSpaceService publishes
++ * as soon as the game gets focus, before its process creates a VkInstance.
++ */
++bool IsAfmeArmed() {
++    if (!android::base::GetBoolProperty("persist.sys.afme.enable", false))
++        return false;
++    const std::string app =
++        android::base::GetProperty("persist.sys.afme.app", "");
++    if (app.empty())
++        return false;
++    std::string cmdline;
++    if (!android::base::ReadFileToString("/proc/self/cmdline", &cmdline))
++        return false;
++    const std::string process(cmdline.c_str());
++    return process == app || android::base::StartsWith(process, app + ":");
++}
++
+ /* This function is used to discover all of the implicit, explicit, platform,
+  * and OEM layers that should be used for the process (typically an application
+  * APK, but potentially a system process such as SurfaceFlinger).
+@@ -574,6 +602,11 @@ void DiscoverLayers() {
+         DiscoverLayersInPathList(kSystemDebugLayerLibraryDir,
+                                  LayerType::IMPLICIT);
+     }
++    // The AFME layer, when GameSpace armed it for this process. It must be
++    // found here, before any PLATFORM or OEM layer, to be enabled implicitly.
++    if (IsAfmeArmed()) {
++        DiscoverLayersInPathList(kAfmeLayerLibraryDir, LayerType::IMPLICIT);
++    }
+     // Look in the application's APK for "explicit" layers.  Also look for
+     // "implicit" layers living in another APK(s), configured by all of the
+     // per-app settings described above.  If configured, both APKs are returned
+diff --git a/vulkan/libvulkan/layers_extensions.h b/vulkan/libvulkan/layers_extensions.h
+index dfbac15..fda5e3b 100644
+--- a/vulkan/libvulkan/layers_extensions.h
++++ b/vulkan/libvulkan/layers_extensions.h
+@@ -44,6 +44,7 @@ class LayerRef {
+ };
+ 
+ void DiscoverLayers();
++bool IsAfmeArmed();
+ 
+ uint32_t GetEnumeratedLayerCount();
+ uint32_t GetOemAndPlatformLayerCount();
+-- 
+2.43.0
+
