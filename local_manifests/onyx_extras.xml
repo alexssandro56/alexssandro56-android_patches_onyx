@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+     Copy to .repo/local_manifests/ and run repo sync.
+-->
+<manifest>
+    <remote name="onyx-extras-github" fetch="https://github.com/" />
+
+    <!-- This repository: patches, the ax_* SDK modules and the integration makefiles -->
+    <project path="vendor/onyx-extras"
+             name="alexssandro56/alexssandro56-android_patches_onyx"
+             remote="onyx-extras-github"
+             revision="ccr-786c7be0-pn26hi" />
+
+    <!-- GameSpace app, crDroid 17.0 -->
+    <project path="packages/apps/GameSpace"
+             name="crdroidandroid/android_packages_apps_GameSpace"
+             remote="onyx-extras-github"
+             revision="17.0" />
+
+    <!-- Open-source replacement for mi_thermald -->
+    <project path="external/mithermald"
+             name="IRedDragonICY/mithermald"
+             remote="onyx-extras-github"
+             revision="main" />
+</manifest>

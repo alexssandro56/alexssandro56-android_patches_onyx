@@ -1,0 +1,54 @@
+From da45dbebc49e47793ab3a19b55318383492c3a99 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 23:20:00 +0000
+Subject: [PATCH] onyx: Wire up onyx-extras
+
+- inherit vendor/onyx-extras/onyx_extras.mk (GameSpace, mi_thermal_engine)
+- include its BoardConfigExtras.mk (mi_thermal_engine sepolicy)
+- stop importing the stock init.mi_thermald.rc, so mi_thermald and
+  mi_thermal_engine don't both drive the thermal and charging limits
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ BoardConfig.mk      | 3 +++
+ device.mk           | 3 +++
+ init/init.target.rc | 1 -
+ 3 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index d98fca3..b292738 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -219,3 +219,6 @@ include vendor/xiaomi/onyx/BoardConfigVendor.mk
+ 
+ # Vendor MiuiCamera
+ -include device/xiaomi/onyx-miuicamera/BoardConfig.mk
++
++# Extras (GameSpace, mithermald)
++-include vendor/onyx-extras/BoardConfigExtras.mk
+diff --git a/device.mk b/device.mk
+index 89542e3..494956f 100644
+--- a/device.mk
++++ b/device.mk
+@@ -418,3 +418,6 @@ $(call inherit-product-if-exists, packages/apps/NotGameTurbo/notgameturbo.mk)
+ 
+ # Vendor MiuiCamera
+ $(call inherit-product-if-exists, device/xiaomi/onyx-miuicamera/device.mk)
++
++# Extras (GameSpace, mithermald)
++$(call inherit-product-if-exists, vendor/onyx-extras/onyx_extras.mk)
+diff --git a/init/init.target.rc b/init/init.target.rc
+index 3b2ba42..de8bd7e 100644
+--- a/init/init.target.rc
++++ b/init/init.target.rc
+@@ -62,7 +62,6 @@
+ 
+ import /vendor/etc/init/hw/init.qti.kernel.rc
+ import /vendor/etc/init/hw/init.batterysecret.rc
+-import /vendor/etc/init/hw/init.mi_thermald.rc
+ 
+ on early-init
+     write /proc/sys/kernel/printk_devkmsg ratelimited
+-- 
+2.43.0
+

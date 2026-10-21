@@ -1,0 +1,30 @@
+type mi_thermal_engine, domain;
+type mi_thermal_engine_exec, exec_type, file_type, vendor_file_type;
+
+init_daemon_domain(mi_thermal_engine)
+
+# Thermal zones, cooling devices and thermal_message
+r_dir_file(mi_thermal_engine, sysfs_thermal)
+allow mi_thermal_engine sysfs_thermal:file w_file_perms;
+
+# CPU and GPU frequency limits
+r_dir_file(mi_thermal_engine, sysfs_devices_system_cpu)
+allow mi_thermal_engine sysfs_devices_system_cpu:file w_file_perms;
+r_dir_file(mi_thermal_engine, vendor_sysfs_kgsl)
+allow mi_thermal_engine vendor_sysfs_kgsl:file w_file_perms;
+
+# Battery and charger (mca_* and xm_power)
+r_dir_file(mi_thermal_engine, vendor_sysfs_battery_supply)
+allow mi_thermal_engine vendor_sysfs_battery_supply:file w_file_perms;
+r_dir_file(mi_thermal_engine, vendor_sysfs_xm_power)
+allow mi_thermal_engine vendor_sysfs_xm_power:file w_file_perms;
+r_dir_file(mi_thermal_engine, sysfs)
+allow mi_thermal_engine sysfs:file w_file_perms;
+
+# CPU load
+allow mi_thermal_engine proc_stat:file r_file_perms;
+
+# Tuning comes from persist.sys.mithermal.*, which only GameSpace from
+# IRedDragonICY sets. Unset, the daemon runs on its defaults.
+dontaudit mi_thermal_engine default_prop:file r_file_perms;
+dontaudit mi_thermal_engine system_prop:file r_file_perms;

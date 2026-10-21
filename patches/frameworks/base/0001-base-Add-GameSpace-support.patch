@@ -1,0 +1,881 @@
+From 17f59b4645f51dc8d620c4e9b4f618972f6333e7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 23:16:53 +0000
+Subject: [PATCH] base: Add GameSpace support
+
+Port of the crDroid 17.0 GameSpace framework support:
+- 5c0bee650d4 core: adding support for game space (rmp22, from AxionOS)
+- 2133c5519ab services: Treat gamespace apps as games (rmp22)
+- cd8470b5b68 services: Add toggle for gamespace auto detect apps
+  (Pranav Vashi)
+
+GameSpaceService tracks the focused app on the default display and
+starts io.chaldeaprjkt.gamespace's SessionService when a game from
+gamespace_game_list comes to the front, and stops it when the game
+leaves or the keyguard shows. While a game is active, full screen
+intents are suppressed in SystemUI.
+
+Adapted to AOSPA: the hooks sit next to AOSPA's own code (no
+AxSandboxService here), and the bypass-charge path in
+GameStateDispatcher is dropped since it needs the LineageOS SDK
+HealthInterface, which AOSPA doesn't ship.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../collection/NotificationEntry.java         |   9 +
+ .../StatusBarNotificationActivityStarter.java |   3 +
+ .../server/app/GameManagerService.java        |  18 ++
+ .../server/wm/ActivityTaskSupervisor.java     |   5 +
+ .../com/android/server/wm/DisplayContent.java |   8 +
+ .../android/server/wm/GameListManager.java    | 237 ++++++++++++++++++
+ .../android/server/wm/GamePackageHandler.java |  92 +++++++
+ .../android/server/wm/GameSpaceService.java   | 196 +++++++++++++++
+ .../server/wm/GameStateDispatcher.java        | 103 ++++++++
+ .../android/server/wm/KeyguardController.java |   9 +
+ .../java/com/android/server/SystemServer.java |   5 +
+ 11 files changed, 685 insertions(+)
+ create mode 100644 services/core/java/com/android/server/wm/GameListManager.java
+ create mode 100644 services/core/java/com/android/server/wm/GamePackageHandler.java
+ create mode 100644 services/core/java/com/android/server/wm/GameSpaceService.java
+ create mode 100644 services/core/java/com/android/server/wm/GameStateDispatcher.java
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java
+index 1c080ea5..b1685262 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/notification/collection/NotificationEntry.java
+@@ -55,6 +55,8 @@ import android.net.Uri;
+ import android.os.Bundle;
+ import android.os.Parcelable;
+ import android.os.SystemClock;
++import android.os.UserHandle;
++import android.provider.Settings;
+ import android.service.notification.NotificationListenerService.Ranking;
+ import android.service.notification.SnoozeCriterion;
+ import android.service.notification.StatusBarNotification;
+@@ -911,6 +913,12 @@ public final class NotificationEntry extends ListEntry {
+     }
+ 
+     private boolean shouldSuppressVisualEffect(int effect) {
++        if (effect == SUPPRESSED_EFFECT_FULL_SCREEN_INTENT
++                && row != null
++                && Settings.Secure.getIntForUser(row.getContext().getContentResolver(),
++                        KEY_GAMING_MODE_ACTIVE, 0, UserHandle.USER_CURRENT) == 1) {
++            return true;
++        }
+         if (isExemptFromDndVisualSuppression()) {
+             return false;
+         }
+@@ -1165,4 +1173,5 @@ public final class NotificationEntry extends ListEntry {
+     private static final int COLOR_INVALID = 1;
+ 
+     private static final String TAG = "NotificationEntry";
++    private static final String KEY_GAMING_MODE_ACTIVE = "ax_gaming_mode_active";
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarNotificationActivityStarter.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarNotificationActivityStarter.java
+index 7e72f6b7..4d063cb3 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarNotificationActivityStarter.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarNotificationActivityStarter.java
+@@ -782,6 +782,9 @@ public class StatusBarNotificationActivityStarter implements NotificationActivit
+ 
+     @VisibleForTesting
+     void launchFullScreenIntent(NotificationEntry entry) {
++        if (entry.shouldSuppressFullScreenIntent()) {
++            return;
++        }
+         // Skip if device is in VR mode.
+         if (mPresenter.isDeviceInVrMode()) {
+             mLogger.logFullScreenIntentSuppressedByVR(entry);
+diff --git a/services/core/java/com/android/server/app/GameManagerService.java b/services/core/java/com/android/server/app/GameManagerService.java
+index d6ea4d23..e14b5acb 100644
+--- a/services/core/java/com/android/server/app/GameManagerService.java
++++ b/services/core/java/com/android/server/app/GameManagerService.java
+@@ -80,6 +80,7 @@ import android.os.UserHandle;
+ import android.os.UserManager;
+ import android.provider.DeviceConfig;
+ import android.provider.DeviceConfig.Properties;
++import android.provider.Settings;
+ import android.text.TextUtils;
+ import android.util.ArrayMap;
+ import android.util.AtomicFile;
+@@ -115,10 +116,12 @@ import java.io.PrintWriter;
+ import java.nio.charset.Charset;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.stream.Collectors;
+ 
+ /**
+  * Service to manage game related features.
+@@ -1042,6 +1045,21 @@ public final class GameManagerService extends IGameManagerService.Stub {
+     }
+ 
+     private boolean isPackageGame(String packageName, @UserIdInt int userId) {
++        final String gameList = Settings.System.getStringForUser(
++                mContext.getContentResolver(),
++                "gamespace_game_list",
++                userId);
++
++        final Set<String> gamePkgs = (gameList == null || gameList.isEmpty())
++                ? Collections.emptySet()
++                : Arrays.stream(gameList.split(";"))
++                        .map(entry -> entry.split("=")[0])
++                        .collect(Collectors.toSet());
++
++        if (gamePkgs.contains(packageName)) {
++            return true;
++        }
++
+         try {
+             final ApplicationInfo applicationInfo = mPackageManager
+                     .getApplicationInfoAsUser(packageName, PackageManager.MATCH_ALL, userId);
+diff --git a/services/core/java/com/android/server/wm/ActivityTaskSupervisor.java b/services/core/java/com/android/server/wm/ActivityTaskSupervisor.java
+index 2229ff52..3025925f 100644
+--- a/services/core/java/com/android/server/wm/ActivityTaskSupervisor.java
++++ b/services/core/java/com/android/server/wm/ActivityTaskSupervisor.java
+@@ -1997,6 +1997,11 @@ public class ActivityTaskSupervisor implements RecentTasks.Callbacks {
+             }
+             mBalController
+                 .checkActivityAllowedToClearTask(task, callingUid, callingPid, callerActivityClassName);
++            final GameSpaceService gameSpaceService =
++                    LocalServices.getService(GameSpaceService.class);
++            if (gameSpaceService != null) {
++                gameSpaceService.removeTask(task);
++            }
+         } finally {
+             task.mInRemoveTask = false;
+             mService.mChainTracker.endPartial();
+diff --git a/services/core/java/com/android/server/wm/DisplayContent.java b/services/core/java/com/android/server/wm/DisplayContent.java
+index c55085d3..abcde6de 100644
+--- a/services/core/java/com/android/server/wm/DisplayContent.java
++++ b/services/core/java/com/android/server/wm/DisplayContent.java
+@@ -271,6 +271,7 @@ import com.android.internal.protolog.ProtoLog;
+ import com.android.internal.util.ToBooleanFunction;
+ import com.android.internal.util.function.pooled.PooledLambda;
+ import com.android.internal.util.function.pooled.PooledPredicate;
++import com.android.server.LocalServices;
+ import com.android.server.input.InputManagerService;
+ import com.android.server.inputmethod.InputMethodManagerInternal;
+ import com.android.server.policy.WindowManagerPolicy;
+@@ -4523,6 +4524,13 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+             if (newTask != null) newTask.onAppFocusChanged(true);
+         }
+ 
++        if (newFocus != null && isDefaultDisplay) {
++            final GameSpaceService gameSpaceService =
++                    LocalServices.getService(GameSpaceService.class);
++            if (gameSpaceService != null) {
++                gameSpaceService.onAppFocusChanged(newFocus, newTask);
++            }
++        }
+         getInputMonitor().setFocusedAppLw(newFocus);
+         return true;
+     }
+diff --git a/services/core/java/com/android/server/wm/GameListManager.java b/services/core/java/com/android/server/wm/GameListManager.java
+new file mode 100644
+index 00000000..ec06a118
+--- /dev/null
++++ b/services/core/java/com/android/server/wm/GameListManager.java
+@@ -0,0 +1,237 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.android.server.wm;
++
++import android.content.ContentResolver;
++import android.content.Context;
++import android.database.ContentObserver;
++import android.os.Handler;
++import android.os.UserHandle;
++import android.provider.Settings;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++class GameListManager {
++    interface GameListChangeListener {
++        void onGameListChanged();
++    }
++
++    private static final String GAME_LIST_KEY = "gamespace_game_list";
++    private static final String PERF_MODE_VALUE = "2";
++    private static final String DENIED_LIST_KEY = "gamespace_denied_list";
++
++    private final Context mContext;
++    private final Map<String, String> mGameList = Collections.synchronizedMap(new HashMap<>());
++    private final List<GameListChangeListener> mListeners = new ArrayList<>();
++
++    private final Set<String> mDeniedList =
++            Collections.synchronizedSet(new HashSet<>());
++
++    GameListManager(Context context) {
++        mContext = context;
++        loadGameList();
++        loadDeniedList();
++    }
++
++    void loadGameList() {
++        final String raw = Settings.System.getStringForUser(mContext.getContentResolver(),
++                GAME_LIST_KEY, UserHandle.USER_CURRENT);
++        final Map<String, String> parsed = parseGameList(raw);
++        synchronized (mGameList) {
++            mGameList.clear();
++            mGameList.putAll(parsed);
++        }
++        notifyListeners();
++    }
++
++    void loadDeniedList() {
++        String raw = Settings.System.getStringForUser(mContext.getContentResolver(),
++                DENIED_LIST_KEY, UserHandle.USER_CURRENT);
++        Set<String> parsed = parseDeniedList(raw);
++        synchronized (mDeniedList) {
++            mDeniedList.clear();
++            mDeniedList.addAll(parsed);
++        }
++    }
++
++    private Set<String> parseDeniedList(String raw) {
++        Set<String> set = new HashSet<>();
++        if (raw == null || raw.isEmpty()) return set;
++        for (String packageName : raw.split(";")) {
++            String trimmed = packageName.trim();
++            if (!trimmed.isEmpty() && trimmed.matches("[a-zA-Z0-9_.]+")) {
++                set.add(trimmed);
++            }
++        }
++        return set;
++    }
++
++    private void writeDeniedList() {
++        StringBuilder sb = new StringBuilder();
++        synchronized (mDeniedList) {
++            for (String packageName : mDeniedList) {
++                if (sb.length() > 0) sb.append(';');
++                sb.append(packageName);
++            }
++        }
++        Settings.System.putStringForUser(mContext.getContentResolver(),
++                DENIED_LIST_KEY, sb.toString(), UserHandle.USER_CURRENT);
++    }
++
++    boolean isDenied(String packageName) {
++        synchronized (mDeniedList) {
++            return mDeniedList.contains(packageName);
++        }
++    }
++
++    void addDenied(String packageName) {
++        synchronized (mDeniedList) {
++            if (!mDeniedList.add(packageName)) return;
++        }
++        writeDeniedList();
++    }
++
++    void removeDenied(String packageName) {
++        synchronized (mDeniedList) {
++            if (!mDeniedList.remove(packageName)) return;
++        }
++        writeDeniedList();
++    }
++
++    boolean isGame(String packageName) {
++        synchronized (mGameList) {
++            return mGameList.containsKey(packageName);
++        }
++    }
++
++    boolean isGameInPerfMode(String packageName) {
++        synchronized (mGameList) {
++            return PERF_MODE_VALUE.equals(mGameList.get(packageName));
++        }
++    }
++
++    void registerGameListObserver(Handler handler) {
++        mContext.getContentResolver().registerContentObserver(
++                Settings.System.getUriFor(GAME_LIST_KEY),
++                false,
++                new ContentObserver(handler) {
++                    @Override
++                    public void onChange(boolean selfChange) {
++                        loadGameList();
++                    }
++                },
++                UserHandle.USER_ALL);
++
++        mContext.getContentResolver().registerContentObserver(
++                Settings.System.getUriFor(DENIED_LIST_KEY),
++                false,
++                new ContentObserver(handler) {
++                    @Override
++                    public void onChange(boolean selfChange) {
++                        loadDeniedList();
++                    }
++                },
++                UserHandle.USER_ALL);
++    }
++
++    void addGame(String packageName) {
++        updateGameList(packageName, true);
++    }
++
++    void removeGame(String packageName) {
++        updateGameList(packageName, false);
++    }
++
++    void addListener(GameListChangeListener listener) {
++        synchronized (mListeners) {
++            mListeners.add(listener);
++        }
++    }
++
++    private void updateGameList(String packageName, boolean add) {
++        final ContentResolver resolver = mContext.getContentResolver();
++        final String raw = Settings.System.getStringForUser(resolver, GAME_LIST_KEY,
++                UserHandle.USER_CURRENT);
++        final Map<String, String> gameMap = parseGameList(raw);
++
++        final boolean modified;
++        if (add) {
++            modified = !PERF_MODE_VALUE.equals(gameMap.get(packageName));
++            if (modified) {
++                gameMap.put(packageName, PERF_MODE_VALUE);
++            }
++        } else {
++            modified = gameMap.remove(packageName) != null;
++        }
++
++        if (!modified) {
++            return;
++        }
++
++        Settings.System.putStringForUser(resolver, GAME_LIST_KEY, formatGameList(gameMap),
++                UserHandle.USER_CURRENT);
++        synchronized (mGameList) {
++            if (add) {
++                mGameList.put(packageName, PERF_MODE_VALUE);
++            } else {
++                mGameList.remove(packageName);
++            }
++        }
++        notifyListeners();
++    }
++
++    private Map<String, String> parseGameList(String raw) {
++        final Map<String, String> gameMap = new HashMap<>();
++        if (raw == null || raw.isEmpty()) {
++            return gameMap;
++        }
++
++        for (String entry : raw.split(";")) {
++            final String[] parts = entry.split("=", 2);
++            if (parts.length == 2
++                    && parts[0].matches("[a-zA-Z0-9_.]+")
++                    && parts[1].matches("\\d+")) {
++                gameMap.put(parts[0].trim(), parts[1].trim());
++            }
++        }
++        return gameMap;
++    }
++
++    private String formatGameList(Map<String, String> gameMap) {
++        final StringBuilder builder = new StringBuilder();
++        for (Map.Entry<String, String> entry : gameMap.entrySet()) {
++            if (builder.length() > 0) {
++                builder.append(';');
++            }
++            builder.append(entry.getKey()).append('=').append(entry.getValue());
++        }
++        return builder.toString();
++    }
++
++    private void notifyListeners() {
++        synchronized (mListeners) {
++            for (GameListChangeListener listener : mListeners) {
++                listener.onGameListChanged();
++            }
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/wm/GamePackageHandler.java b/services/core/java/com/android/server/wm/GamePackageHandler.java
+new file mode 100644
+index 00000000..697712ee
+--- /dev/null
++++ b/services/core/java/com/android/server/wm/GamePackageHandler.java
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.android.server.wm;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.os.Handler;
++import android.os.UserHandle;
++import android.provider.Settings;
++
++class GamePackageHandler {
++    private final Context mContext;
++    private final PackageManager mPackageManager;
++    private final GameListManager mGameListManager;
++    private final Handler mHandler;
++
++    GamePackageHandler(Context context, GameListManager manager, Handler handler) {
++        mContext = context;
++        mPackageManager = context.getPackageManager();
++        mGameListManager = manager;
++        mHandler = handler;
++    }
++
++    private boolean isAutoDetectEnabled() {
++        return Settings.System.getIntForUser(mContext.getContentResolver(),
++                "gamespace_auto_game_detect", 1,
++                UserHandle.USER_CURRENT) != 0;
++    }
++
++    void registerPackageReceiver() {
++        final IntentFilter filter = new IntentFilter();
++        filter.addAction(Intent.ACTION_PACKAGE_ADDED);
++        filter.addAction(Intent.ACTION_PACKAGE_FULLY_REMOVED);
++        filter.addDataScheme("package");
++        mContext.registerReceiver(new PackageReceiver(), filter, Context.RECEIVER_NOT_EXPORTED);
++    }
++
++    private void handlePackageChanged(String action, String packageName) {
++        if (Intent.ACTION_PACKAGE_ADDED.equals(action)) {
++            if (!isAutoDetectEnabled()) return;
++            if (mGameListManager.isDenied(packageName)) return;
++            if (mGameListManager.isGame(packageName)) return;
++            if (isGame(packageName)) {
++                mGameListManager.addGame(packageName);
++            }
++        } else if (Intent.ACTION_PACKAGE_FULLY_REMOVED.equals(action)) {
++            mGameListManager.removeGame(packageName);
++        }
++    }
++
++    private boolean isGame(String packageName) {
++        try {
++            final ApplicationInfo info = mPackageManager.getApplicationInfo(packageName,
++                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA));
++            return info.category == ApplicationInfo.CATEGORY_GAME;
++        } catch (PackageManager.NameNotFoundException e) {
++            return false;
++        }
++    }
++
++    private final class PackageReceiver extends BroadcastReceiver {
++        @Override
++        public void onReceive(Context context, Intent intent) {
++            if (intent == null || intent.getData() == null) {
++                return;
++            }
++            final String packageName = intent.getData().getSchemeSpecificPart();
++            final String action = intent.getAction();
++            if (packageName == null || action == null) {
++                return;
++            }
++            mHandler.post(() -> handlePackageChanged(action, packageName));
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/wm/GameSpaceService.java b/services/core/java/com/android/server/wm/GameSpaceService.java
+new file mode 100644
+index 00000000..2847bdd9
+--- /dev/null
++++ b/services/core/java/com/android/server/wm/GameSpaceService.java
+@@ -0,0 +1,196 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.android.server.wm;
++
++import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
++
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.os.Handler;
++import android.os.Process;
++import android.util.Slog;
++
++import com.android.server.LocalServices;
++import com.android.server.ServiceThread;
++import com.android.server.SystemService;
++
++public final class GameSpaceService extends SystemService {
++    private static final String TAG = "GameSpaceService";
++    private static final long BOOST_DELAY_MS = 500L;
++
++    private final GameListManager mGameListManager;
++    private final GameStateDispatcher mGameStateDispatcher;
++    private final GamePackageHandler mGamePackageHandler;
++    private final ServiceThread mThread;
++    private final Handler mHandler;
++
++    private boolean mStarted;
++    private String mCurrentGame;
++    private Runnable mPendingBoost;
++
++    public GameSpaceService(Context context) {
++        super(context);
++        mThread = new ServiceThread(TAG, Process.THREAD_PRIORITY_BACKGROUND, true);
++        mThread.start();
++        mHandler = new Handler(mThread.getLooper());
++        mGameListManager = new GameListManager(context);
++        mGameStateDispatcher = new GameStateDispatcher(context);
++        mGamePackageHandler = new GamePackageHandler(context, mGameListManager, mHandler);
++    }
++
++    @Override
++    public void onStart() {
++        publishLocalService(GameSpaceService.class, this);
++    }
++
++    @Override
++    public void onBootPhase(int phase) {
++        if (phase == PHASE_ACTIVITY_MANAGER_READY) {
++            startGameSpace();
++        }
++    }
++
++    public void onAppFocusChanged(ActivityRecord record, Task task) {
++        if (record == null || record.packageName == null) {
++            return;
++        }
++        final String packageName = record.packageName;
++        final boolean freeformTask = task != null
++                && task.getWindowingMode() == WINDOWING_MODE_FREEFORM;
++        mHandler.post(() -> updateFocusedPackage(packageName, freeformTask));
++    }
++
++    public void removeTask(Task task) {
++        if (task == null) {
++            return;
++        }
++        final String packageName = getTaskPackageName(task);
++        if (packageName == null) {
++            return;
++        }
++        mHandler.post(() -> {
++            if (packageName.equals(mCurrentGame)) {
++                mCurrentGame = null;
++                stopOverlay();
++            }
++        });
++    }
++
++    private String getTaskPackageName(Task task) {
++        final ActivityRecord top = task.getTopMostActivity();
++        if (top != null && top.packageName != null) {
++            return top.packageName;
++        }
++        final Intent baseIntent = task.getBaseIntent();
++        final ComponentName component = baseIntent != null ? baseIntent.getComponent() : null;
++        return component != null ? component.getPackageName() : null;
++    }
++
++    public void onKeyguardChanged(boolean showing) {
++        mHandler.post(() -> {
++            if (mCurrentGame == null) {
++                return;
++            }
++            if (showing) {
++                stopOverlay();
++            } else {
++                startOverlay();
++            }
++        });
++    }
++
++    private void startGameSpace() {
++        if (mStarted) {
++            return;
++        }
++        mStarted = true;
++        mGamePackageHandler.registerPackageReceiver();
++        mGameListManager.registerGameListObserver(mHandler);
++        mGameListManager.addListener(() -> mHandler.post(() -> {
++            if (mCurrentGame != null && mGameListManager.isGame(mCurrentGame)) {
++                mGameStateDispatcher.boostGame(mGameListManager.isGameInPerfMode(mCurrentGame));
++            }
++        }));
++        Slog.i(TAG, "GameSpaceService initialized");
++    }
++
++    private void updateFocusedPackage(String packageName, boolean freeformTask) {
++        final boolean gameActive = mCurrentGame != null && isCurrentGameTopApp();
++        if (freeformTask && gameActive) {
++            return;
++        }
++
++        final boolean isGame = mGameListManager.isGame(packageName);
++        boolean shouldStartOverlay = false;
++        boolean shouldStopOverlay = false;
++
++        if (isGame) {
++            if (!packageName.equals(mCurrentGame)) {
++                if (mCurrentGame != null) {
++                    shouldStopOverlay = true;
++                }
++                mCurrentGame = packageName;
++                shouldStartOverlay = true;
++            }
++        } else if (mCurrentGame != null) {
++            mCurrentGame = null;
++            shouldStopOverlay = true;
++        }
++
++        if (shouldStopOverlay) {
++            stopOverlay();
++        }
++        if (shouldStartOverlay) {
++            startOverlay();
++        }
++    }
++
++    private boolean isCurrentGameTopApp() {
++        final ActivityTaskManagerInternal activityTaskManager =
++                LocalServices.getService(ActivityTaskManagerInternal.class);
++        final WindowProcessController topApp = activityTaskManager != null
++                ? activityTaskManager.getTopApp() : null;
++        return topApp != null && topApp.containsPackage(mCurrentGame);
++    }
++
++    private void startOverlay() {
++        final String currentGame = mCurrentGame;
++        if (currentGame == null) {
++            return;
++        }
++        cancelPendingBoost();
++        if (mGameListManager.isGameInPerfMode(currentGame)) {
++            mPendingBoost = () -> mGameStateDispatcher.boostGame(true);
++            mHandler.postDelayed(mPendingBoost, BOOST_DELAY_MS);
++        }
++        mGameStateDispatcher.dispatchGameState(true, currentGame);
++    }
++
++    private void stopOverlay() {
++        cancelPendingBoost();
++        mGameStateDispatcher.dispatchGameState(false, null);
++        mGameStateDispatcher.boostGame(false);
++    }
++
++    private void cancelPendingBoost() {
++        if (mPendingBoost == null) {
++            return;
++        }
++        mHandler.removeCallbacks(mPendingBoost);
++        mPendingBoost = null;
++    }
++}
+diff --git a/services/core/java/com/android/server/wm/GameStateDispatcher.java b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+new file mode 100644
+index 00000000..226b7133
+--- /dev/null
++++ b/services/core/java/com/android/server/wm/GameStateDispatcher.java
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2025-2026 AxionOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.android.server.wm;
++
++import android.app.ActivityManager;
++import android.app.IActivityManager;
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.os.RemoteException;
++import android.os.SystemProperties;
++import android.os.UserHandle;
++import android.provider.Settings;
++import android.util.Slog;
++
++class GameStateDispatcher {
++    private static final String TAG = "GameStateDispatcher";
++    private static final String GAME_SPACE_PACKAGE = "io.chaldeaprjkt.gamespace";
++    private static final String GAME_SPACE_SESSION_SERVICE =
++            "io.chaldeaprjkt.gamespace.gamebar.SessionService";
++    private static final ComponentName GAME_SPACE_SESSION_COMPONENT =
++            new ComponentName(GAME_SPACE_PACKAGE, GAME_SPACE_SESSION_SERVICE);
++    private static final String ACTION_GAME_START = "game_start";
++    private static final String EXTRA_PACKAGE_NAME = "package_name";
++    private static final String KEY_GAMING_MODE_ACTIVE = "ax_gaming_mode_active";
++    private static final String KEY_POWER_MODE_PERF_BY_USER = "power_mode_perf_by_user";
++    private static final String KEY_POWER_MODE_PERF = "persist.sys.power_mode_perf";
++
++    private final Context mContext;
++    private final IActivityManager mActivityManager;
++
++    GameStateDispatcher(Context context) {
++        mContext = context;
++        mActivityManager = ActivityManager.getService();
++    }
++
++    void dispatchGameState(boolean active, String packageName) {
++        Settings.Secure.putIntForUser(mContext.getContentResolver(), KEY_GAMING_MODE_ACTIVE,
++                active ? 1 : 0, UserHandle.USER_CURRENT);
++        updateGameSession(active, packageName);
++    }
++
++    void boostGame(boolean enable) {
++        final int perfByUser = Settings.System.getIntForUser(mContext.getContentResolver(),
++                KEY_POWER_MODE_PERF_BY_USER, 0, UserHandle.USER_CURRENT);
++        if (perfByUser == 1) {
++            return;
++        }
++
++        Settings.System.putIntForUser(mContext.getContentResolver(), KEY_POWER_MODE_PERF,
++                enable ? 1 : 0, UserHandle.USER_CURRENT);
++        SystemProperties.set(KEY_POWER_MODE_PERF, enable ? "1" : "0");
++    }
++
++    private void updateGameSession(boolean active, String packageName) {
++        if (active) {
++            startGameSession(packageName);
++            return;
++        }
++        stopGameSession();
++    }
++
++    private void startGameSession(String packageName) {
++        if (packageName == null) {
++            return;
++        }
++        final Intent intent = new Intent(ACTION_GAME_START)
++                .setComponent(GAME_SPACE_SESSION_COMPONENT)
++                .putExtra(EXTRA_PACKAGE_NAME, packageName);
++        try {
++            final ComponentName result = mActivityManager.startService(null, intent, null, false,
++                    mContext.getOpPackageName(), mContext.getAttributionTag(),
++                    UserHandle.USER_CURRENT);
++            if (result == null) {
++                Slog.w(TAG, "GameSpace session service not found");
++            }
++        } catch (RemoteException | RuntimeException e) {
++            Slog.w(TAG, "Failed to start GameSpace session", e);
++        }
++    }
++
++    private void stopGameSession() {
++        final Intent intent = new Intent().setComponent(GAME_SPACE_SESSION_COMPONENT);
++        try {
++            mActivityManager.stopService(null, intent, null, UserHandle.USER_CURRENT);
++        } catch (RemoteException | RuntimeException e) {
++            Slog.w(TAG, "Failed to stop GameSpace session", e);
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/wm/KeyguardController.java b/services/core/java/com/android/server/wm/KeyguardController.java
+index e9294c09..21a4f97a 100644
+--- a/services/core/java/com/android/server/wm/KeyguardController.java
++++ b/services/core/java/com/android/server/wm/KeyguardController.java
+@@ -61,6 +61,7 @@ import android.util.proto.ProtoOutputStream;
+ import android.view.Display;
+ 
+ import com.android.internal.policy.IKeyguardDismissCallback;
++import com.android.server.LocalServices;
+ import com.android.server.inputmethod.InputMethodManagerInternal;
+ import com.android.server.policy.WindowManagerPolicy;
+ import com.android.window.flags.Flags;
+@@ -240,6 +241,14 @@ class KeyguardController {
+         state.mAodShowing = aodShowing;
+         state.writeEventLog("setKeyguardShown");
+ 
++        if (displayId == DEFAULT_DISPLAY && keyguardChanged) {
++            final GameSpaceService gameSpaceService =
++                    LocalServices.getService(GameSpaceService.class);
++            if (gameSpaceService != null) {
++                gameSpaceService.onKeyguardChanged(keyguardShowing);
++            }
++        }
++
+         if (keyguardChanged || (Flags.aodTransition() && aodChanged)) {
+             if (keyguardChanged) {
+                 // Irrelevant to AOD.
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index 307af5d2..f4e6233f 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -328,6 +328,7 @@ import com.android.server.wallpapereffectsgeneration.WallpaperEffectsGenerationM
+ import com.android.server.wearable.WearableSensingManagerService;
+ import com.android.server.webkit.WebViewUpdateService;
+ import com.android.server.wm.ActivityTaskManagerService;
++import com.android.server.wm.GameSpaceService;
+ import com.android.server.wm.WindowManagerGlobalLock;
+ import com.android.server.wm.WindowManagerService;
+ import com.android.server.lineage.health.HealthInterfaceService;
+@@ -1805,6 +1806,10 @@ public final class SystemServer implements Dumpable {
+             wm.onInitReady();
+             t.traceEnd();
+ 
++            t.traceBegin("StartGameSpaceService");
++            mSystemServiceManager.startService(GameSpaceService.class);
++            t.traceEnd();
++
+             // Start receiving calls from SensorManager services. Start in a separate thread
+             // because it need to connect to SensorManager. This has to start
+             // after PHASE_WAIT_FOR_SENSOR_SERVICE is done.
+-- 
+2.43.0
+
