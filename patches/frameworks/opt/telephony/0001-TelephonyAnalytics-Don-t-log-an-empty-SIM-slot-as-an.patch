@@ -1,0 +1,42 @@
+From 5c6e3a0d80e2fa2679b19621352bcacc6b265aed Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Thu, 22 Oct 2026 08:42:35 +0000
+Subject: [PATCH] TelephonyAnalytics: Don't log an empty SIM slot as an error
+
+getSubId() dereferenced the active subscription of its slot and caught
+the NullPointerException, so a phone with one SIM logged "Null Pointer
+Exception Caught" for the empty slot on every subscription change.
+Check for a missing subscription instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ .../internal/telephony/analytics/TelephonyAnalytics.java | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/src/java/com/android/internal/telephony/analytics/TelephonyAnalytics.java b/src/java/com/android/internal/telephony/analytics/TelephonyAnalytics.java
+index 6ee0dad..b8675dd 100644
+--- a/src/java/com/android/internal/telephony/analytics/TelephonyAnalytics.java
++++ b/src/java/com/android/internal/telephony/analytics/TelephonyAnalytics.java
+@@ -135,14 +135,13 @@ public class TelephonyAnalytics {
+     @SuppressLint("MissingPermission")
+     private int getSubId() {
+         int subId = INVALID_SUB_ID;
+-        try {
+-            SubscriptionInfo info =
+-                    mSubscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(mSlotIndex);
++        // An empty slot has no active subscription, which is not an error.
++        SubscriptionInfo info = mSubscriptionManager == null ? null
++                : mSubscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(mSlotIndex);
++        if (info != null) {
+             subId = info.getSubscriptionId();
+             Rlog.d("TelephonyAnalyticsSubId", "SubId = " + subId
+                     + "SlotIndex = " + mSlotIndex);
+-        } catch (NullPointerException e) {
+-            Rlog.e("TelephonyAnalyticsSubId", "Null Pointer Exception Caught");
+         }
+         return subId;
+     }
+-- 
+2.43.0
+
