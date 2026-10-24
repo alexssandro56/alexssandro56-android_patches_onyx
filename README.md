@@ -14,6 +14,7 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 | `vendorsetup.sh` | Aplica os patches de `patches/` em todo `source build/envsetup.sh` |
 | `patches/frameworks/base/` | Suporte ao GameSpace no `system_server` e no SystemUI (serviço `game_space`, AFME, bypass de carregamento, serviço AxPlatform) |
 | `patches/frameworks/native/` | Carregadores EGL e Vulkan carregam os layers do AFME no jogo armado |
+| `patches/external/mithermald/` | Ajusta o mithermald ao `librustutils` do Android 17 (`rustutils::android::system_properties`) |
 | `patches/packages/apps/GameSpace/` | Remove a dependência do SDK da LineageOS, que o AOSPA não tem |
 | `sdk/` | Módulos `ax_*` e as bibliotecas Compose pré-compiladas que o GameSpace usa |
 | `mithermald/sepolicy/` | Política SELinux do `mi_thermal_engine` (a ROM é enforcing) |

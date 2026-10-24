@@ -1,0 +1,103 @@
+From 24f55ca55dd3ce04d7da638c94c592f4bb6bbb84 Mon Sep 17 00:00:00 2001
+From: alexssandro56 <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 01:39:34 +0000
+Subject: [PATCH] Use rustutils::android::system_properties
+
+Newer librustutils moved system_properties under the android module,
+so the old path no longer resolves.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ src/config.rs |  2 +-
+ src/sic.rs    |  4 ++--
+ src/ss.rs     | 10 +++++-----
+ 3 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/src/config.rs b/src/config.rs
+index 360db30..de32648 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -8,7 +8,7 @@
+ //! Pattern copied from AOSP `mmd` daemon (system/memory/mmd).
+ 
+ use log::info;
+-use rustutils::system_properties;
++use rustutils::android::system_properties;
+ 
+ /// How often to re-read system properties (in polling cycles).
+ /// At 1Hz polling, 5 = re-read every 5 seconds.
+diff --git a/src/sic.rs b/src/sic.rs
+index 3109224..4ba471c 100644
+--- a/src/sic.rs
++++ b/src/sic.rs
+@@ -593,7 +593,7 @@ impl SicAlgo {
+ // ================================================================
+ 
+ fn read_prop_str_local(prop: &str) -> Option<String> {
+-    match rustutils::system_properties::read(prop) {
++    match rustutils::android::system_properties::read(prop) {
+         Ok(Some(val)) if !val.trim().is_empty() => Some(val),
+         _ => None,
+     }
+@@ -612,7 +612,7 @@ fn read_charging_chunks() -> Option<String> {
+     let mut json = String::with_capacity(count as usize * CHARGING_CHUNK_SIZE);
+     for i in 0..count {
+         let name = format!("{}{}", PROP_CHARGING_CHUNK, i);
+-        match rustutils::system_properties::read(&name) {
++        match rustutils::android::system_properties::read(&name) {
+             Ok(Some(chunk)) if !chunk.is_empty() => json.push_str(&chunk),
+             _ => {
+                 warn!("SIC: missing charging chunk {}/{}", i, count);
+diff --git a/src/ss.rs b/src/ss.rs
+index 1b2713d..4851c3f 100644
+--- a/src/ss.rs
++++ b/src/ss.rs
+@@ -1749,7 +1749,7 @@ impl SsAlgo {
+                   if cluster.fd.is_some() { "OK" } else { "FAIL" });
+         }
+ 
+-        let profile_name = match rustutils::system_properties::read(PROP_ACTIVE_PROFILE) {
++        let profile_name = match rustutils::android::system_properties::read(PROP_ACTIVE_PROFILE) {
+             Ok(Some(val)) if !val.is_empty() => val,
+             _ => PROFILE_NAME_DEFAULT.to_string(),
+         };
+@@ -2017,7 +2017,7 @@ fn parse_custom_extras() -> CustomExtras {
+ 
+ /// Read a system property as a trimmed non-empty String (rare path).
+ fn read_prop_str(prop: &str) -> Option<String> {
+-    match rustutils::system_properties::read(prop) {
++    match rustutils::android::system_properties::read(prop) {
+         Ok(Some(val)) if !val.trim().is_empty() => Some(val),
+         _ => None,
+     }
+@@ -2055,7 +2055,7 @@ fn compute_ss_level_predictive(
+ /// Returns the new profile name, or None if unchanged from `current`.
+ /// This avoids heap allocation in the common case (profile unchanged).
+ fn read_profile_prop_if_changed(current: &str) -> Option<String> {
+-    match rustutils::system_properties::read(PROP_ACTIVE_PROFILE) {
++    match rustutils::android::system_properties::read(PROP_ACTIVE_PROFILE) {
+         Ok(Some(val)) if !val.is_empty() => {
+             if val == current { None } else { Some(val) }
+         }
+@@ -2079,7 +2079,7 @@ const PROP_CUSTOM_CHUNK_PREFIX: &str = "persist.sys.mithermal.custom.";
+ 
+ /// Read a system property as i64 (rare path — profile switches only).
+ fn read_prop_i64(prop: &str) -> Option<i64> {
+-    match rustutils::system_properties::read(prop) {
++    match rustutils::android::system_properties::read(prop) {
+         Ok(Some(val)) => val.trim().parse::<i64>().ok(),
+         _ => None,
+     }
+@@ -2095,7 +2095,7 @@ fn read_custom_profile_props() -> Option<String> {
+     let mut json = String::with_capacity(count as usize * 92);
+     for i in 0..count {
+         let name = format!("{}{}", PROP_CUSTOM_CHUNK_PREFIX, i);
+-        match rustutils::system_properties::read(&name) {
++        match rustutils::android::system_properties::read(&name) {
+             Ok(Some(chunk)) if !chunk.is_empty() => json.push_str(&chunk),
+             _ => {
+                 warn!("SS: missing custom profile chunk {}/{}", i, count);
+-- 
+2.43.0
+
