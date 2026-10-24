@@ -1,0 +1,30 @@
+From 96599608827ffd5a9d993b19dd4ce03d3b77c957 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 01:50:21 +0000
+Subject: [PATCH] GameSpace: Use the AOSPA ScreenshotHelper signature
+
+AOSPA's ScreenshotHelper.takeScreenshot() takes the source, handler and
+consumer; the screenshot type argument is crDroid only, so kotlinc fails.
+Drop it, AOSPA always takes a full screen screenshot here.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ .../main/java/com/ireddragonicy/gamespace/utils/ScreenUtils.kt   | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/app/src/main/java/com/ireddragonicy/gamespace/utils/ScreenUtils.kt b/app/src/main/java/com/ireddragonicy/gamespace/utils/ScreenUtils.kt
+index 82b0853..0f9b81f 100644
+--- a/app/src/main/java/com/ireddragonicy/gamespace/utils/ScreenUtils.kt
++++ b/app/src/main/java/com/ireddragonicy/gamespace/utils/ScreenUtils.kt
+@@ -31,7 +31,6 @@ class ScreenUtils @Inject constructor(private val context: Context) {
+ 
+     fun takeScreenshot(onComplete: ((Uri?) -> Unit)? = null) {
+         ScreenshotHelper(context).takeScreenshot(
+-            WindowManager.TAKE_SCREENSHOT_FULLSCREEN,
+             WindowManager.ScreenshotSource.SCREENSHOT_GLOBAL_ACTIONS, handler
+         ) { handler.post { onComplete?.invoke(it) } }
+     }
+-- 
+2.43.0
+
