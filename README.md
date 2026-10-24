@@ -19,6 +19,7 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 | `patches/frameworks/base/0005` | PropImitationHooks: propriedades certificadas para o Play Services e a Play Store, e Pixel para o Google Fotos (sem keybox) |
 | `patches/system/core/` | O init informa bootloader travado, verified boot verde e release-keys para os apps (fora do recovery/fastbootd) |
 | `patches/packages/apps/Spoofify/` | Tira do Spoofify a keybox e a dependência da LineageOS |
+| `patches/frameworks/base/0006`, `patches/packages/apps/Settings/` | Preto puro no tema escuro, com o botão em Configurações > Tela |
 | `patches/packages/apps/GameSpace/` | Remove a dependência do SDK da LineageOS, que o AOSPA não tem |
 | `sdk/` | Módulos `ax_*` e as bibliotecas Compose pré-compiladas que o GameSpace usa |
 | `mithermald/sepolicy/` | Política SELinux do `mi_thermal_engine` (a ROM é enforcing) |
@@ -116,3 +117,12 @@ Base: `AdarshGrewal/android_vendor_extra` (PropImitationHooks) e
   mudam, então o `adb root` continua funcionando na userdebug.
 
 A parte de keybox do original não foi trazida.
+
+## Preto puro
+
+Em Configurações > Tela, logo abaixo de Tema escuro, o botão **Preto puro** liga
+`Settings.Secure.pure_black_theme`. Com o tema escuro ativo, o SystemUI pinta de
+preto o fundo e as superfícies mais baixas do Material You (background, surface,
+surface_dim, surface_container_lowest e surface_container_low). Os containers mais
+altos mantêm o tom, então cartões, folhas e diálogos continuam se destacando.
+Muda na hora, sem reiniciar.

@@ -1,0 +1,119 @@
+From ec4786e6c59b94cd138bd5ff7c6ed6a50213c6e3 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 10:54:24 +0000
+Subject: [PATCH] SystemUI: Add a pure black dark theme
+
+When Settings.Secure.pure_black_theme is on, paint the dark theme's
+background, surface, surface_dim and the two lowest surface containers
+black in the dynamic color overlay. The higher surface containers keep
+their tone, so cards, sheets and dialogs still stand out. Toggling the
+setting reapplies the theme right away.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ core/java/android/provider/Settings.java      |  7 +++
+ .../validators/SecureSettingsValidators.java  |  1 +
+ .../theme/ThemeOverlayController.java         | 43 +++++++++++++++++++
+ 3 files changed, 51 insertions(+)
+
+diff --git a/core/java/android/provider/Settings.java b/core/java/android/provider/Settings.java
+index c3bf5d4..46e227b 100644
+--- a/core/java/android/provider/Settings.java
++++ b/core/java/android/provider/Settings.java
+@@ -13994,6 +13994,13 @@ public final class Settings {
+         @Readable
+         public static final String SPOOF_PROPS = "spoof_props";
+ 
++        /**
++         * Whether the dark theme uses black for the background and surfaces.
++         * @hide
++         */
++        @Readable
++        public static final String PURE_BLACK_THEME = "pure_black_theme";
++
+         /**
+          * Keys we no longer back up under the current schema, but want to continue to
+          * process when restoring historical backup datasets.
+diff --git a/packages/SettingsProvider/src/android/provider/settings/validators/SecureSettingsValidators.java b/packages/SettingsProvider/src/android/provider/settings/validators/SecureSettingsValidators.java
+index faf2b5a..9446e9d 100644
+--- a/packages/SettingsProvider/src/android/provider/settings/validators/SecureSettingsValidators.java
++++ b/packages/SettingsProvider/src/android/provider/settings/validators/SecureSettingsValidators.java
+@@ -564,5 +564,6 @@ public class SecureSettingsValidators {
+         VALIDATORS.put(Secure.CERTIFIED_PROPS_DATA, ANY_STRING_VALIDATOR);
+         VALIDATORS.put(Secure.SPOOF_GOOGLE_PHOTOS, BOOLEAN_VALIDATOR);
+         VALIDATORS.put(Secure.SPOOF_PROPS, BOOLEAN_VALIDATOR);
++        VALIDATORS.put(Secure.PURE_BLACK_THEME, BOOLEAN_VALIDATOR);
+     }
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/theme/ThemeOverlayController.java b/packages/SystemUI/src/com/android/systemui/theme/ThemeOverlayController.java
+index 626a60b..b6f745c 100644
+--- a/packages/SystemUI/src/com/android/systemui/theme/ThemeOverlayController.java
++++ b/packages/SystemUI/src/com/android/systemui/theme/ThemeOverlayController.java
+@@ -185,6 +185,16 @@ public class ThemeOverlayController implements CoreStartable, Dumpable {
+ 
+     // Defers changing themes until Setup Wizard is done.
+     private boolean mDeferredThemeEvaluation;
++    // Dark theme colors that the pure black theme paints black. The surface containers keep
++    // their tone, so cards, sheets and dialogs still stand out.
++    private static final String[] PURE_BLACK_DARK_COLORS = {
++            "background",
++            "surface",
++            "surface_dim",
++            "surface_container_lowest",
++            "surface_container_low",
++    };
++
+     // Determines if we should ignore THEME_CUSTOMIZATION_OVERLAY_PACKAGES setting changes.
+     private boolean mSkipSettingChange;
+ 
+@@ -519,6 +529,27 @@ public class ThemeOverlayController implements CoreStartable, Dumpable {
+                     }
+                 },
+                 UserHandle.USER_ALL);
++
++        mSecureSettings.registerContentObserverForUserSync(
++                Settings.Secure.PURE_BLACK_THEME,
++                false,
++                new ContentObserver(mBgHandler) {
++                    @Override
++                    public void onChange(boolean selfChange, Collection<Uri> collection, int flags,
++                            int userId) {
++                        if (DEBUG) Log.d(TAG, "Pure black theme changed for user: " + userId);
++                        if (mUserTracker.getUserId() != userId) {
++                            return;
++                        }
++                        if (!mDeviceProvisionedController.isUserSetup(userId)) {
++                            Log.i(TAG, "Theme application deferred when setting changed.");
++                            mDeferredThemeEvaluation = true;
++                            return;
++                        }
++                        reevaluateSystemTheme(true /* forceReload */);
++                    }
++                },
++                UserHandle.USER_ALL);
+         int userId = mUserTracker.getUserId();
+         UiModeManager uiModeManager = mUiModeManagerProvider.forUser(UserHandle.of(userId));
+         uiModeManager.addContrastChangeListener(mMainExecutor, mContrastChangeListener);
+@@ -703,6 +734,18 @@ public class ThemeOverlayController implements CoreStartable, Dumpable {
+         assignColorsToOverlay(mDynamicOverlay, DynamicColors.getFixedColorsMapped());
+         // Custom Colors
+         assignColorsToOverlay(mDynamicOverlay, DynamicColors.getCustomColorsMapped());
++
++        if (isPureBlackTheme()) {
++            for (String color : PURE_BLACK_DARK_COLORS) {
++                mDynamicOverlay.setResourceValue("android:color/system_" + color + "_dark",
++                        TYPE_INT_COLOR_ARGB8, Color.BLACK, null);
++            }
++        }
++    }
++
++    private boolean isPureBlackTheme() {
++        return mSecureSettings.getIntForUser(Settings.Secure.PURE_BLACK_THEME, 0,
++                mUserTracker.getUserId()) != 0;
+     }
+ 
+     private void assignColorsToOverlay(FabricatedOverlay overlay,
+-- 
+2.43.0
+

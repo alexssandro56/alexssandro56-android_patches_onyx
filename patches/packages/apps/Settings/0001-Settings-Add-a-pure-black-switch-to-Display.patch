@@ -1,0 +1,119 @@
+From 678aeaa6d8602e849cac2d78008c1214687ed635 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 10:54:55 +0000
+Subject: [PATCH] Settings: Add a pure black switch to Display
+
+Turns Settings.Secure.pure_black_theme on and off, right under Dark
+theme. SystemUI then paints the dark theme's backgrounds black.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ res/values-pt-rBR/onyx_strings.xml            |  9 ++++
+ res/values/onyx_strings.xml                   | 10 +++++
+ res/xml/display_settings.xml                  |  6 +++
+ .../PureBlackThemePreferenceController.java   | 42 +++++++++++++++++++
+ 4 files changed, 67 insertions(+)
+ create mode 100644 res/values-pt-rBR/onyx_strings.xml
+ create mode 100644 res/values/onyx_strings.xml
+ create mode 100644 src/com/android/settings/display/PureBlackThemePreferenceController.java
+
+diff --git a/res/values-pt-rBR/onyx_strings.xml b/res/values-pt-rBR/onyx_strings.xml
+new file mode 100644
+index 0000000..4701491
+--- /dev/null
++++ b/res/values-pt-rBR/onyx_strings.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 alexssandro56
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="pure_black_theme_title">Preto puro</string>
++    <string name="pure_black_theme_summary">Usar preto no lugar do cinza escuro nos fundos do tema escuro</string>
++</resources>
+diff --git a/res/values/onyx_strings.xml b/res/values/onyx_strings.xml
+new file mode 100644
+index 0000000..1ec7413
+--- /dev/null
++++ b/res/values/onyx_strings.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 alexssandro56
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <!-- Display settings: pure black dark theme -->
++    <string name="pure_black_theme_title">Pure black</string>
++    <string name="pure_black_theme_summary">Use black instead of dark gray for backgrounds in dark theme</string>
++</resources>
+diff --git a/res/xml/display_settings.xml b/res/xml/display_settings.xml
+index 29a49be..dc749f8 100644
+--- a/res/xml/display_settings.xml
++++ b/res/xml/display_settings.xml
+@@ -107,6 +107,12 @@
+             settings:controller="com.android.settings.display.DarkUIPreferenceController"
+             settings:keywords="@string/keywords_dark_ui_mode"/>
+ 
++        <SwitchPreferenceCompat
++            android:key="pure_black_theme"
++            android:title="@string/pure_black_theme_title"
++            android:summary="@string/pure_black_theme_summary"
++            settings:controller="com.android.settings.display.PureBlackThemePreferenceController"/>
++
+         <Preference
+             android:fragment="com.android.settings.accessibility.TextReadingPreferenceFragment"
+             android:key="text_reading_options"
+diff --git a/src/com/android/settings/display/PureBlackThemePreferenceController.java b/src/com/android/settings/display/PureBlackThemePreferenceController.java
+new file mode 100644
+index 0000000..e1c4494
+--- /dev/null
++++ b/src/com/android/settings/display/PureBlackThemePreferenceController.java
+@@ -0,0 +1,42 @@
++/*
++ * SPDX-FileCopyrightText: 2026 alexssandro56
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package com.android.settings.display;
++
++import android.content.Context;
++import android.provider.Settings;
++
++import com.android.settings.R;
++import com.android.settings.core.TogglePreferenceController;
++
++/** Switches the dark theme between the dynamic color surfaces and pure black. */
++public class PureBlackThemePreferenceController extends TogglePreferenceController {
++
++    public PureBlackThemePreferenceController(Context context, String key) {
++        super(context, key);
++    }
++
++    @Override
++    public int getAvailabilityStatus() {
++        return AVAILABLE;
++    }
++
++    @Override
++    public boolean isChecked() {
++        return Settings.Secure.getInt(mContext.getContentResolver(),
++                Settings.Secure.PURE_BLACK_THEME, 0) != 0;
++    }
++
++    @Override
++    public boolean setChecked(boolean isChecked) {
++        return Settings.Secure.putInt(mContext.getContentResolver(),
++                Settings.Secure.PURE_BLACK_THEME, isChecked ? 1 : 0);
++    }
++
++    @Override
++    public int getSliceHighlightMenuRes() {
++        return R.string.menu_key_display;
++    }
++}
+-- 
+2.43.0
+
