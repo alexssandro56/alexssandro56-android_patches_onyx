@@ -13,6 +13,3 @@ allow system_app sysfs_thermal:file w_file_perms;
 # PerfTuner raises the CPU floor; the monitor reads the current frequencies
 r_dir_file(system_app, sysfs_devices_system_cpu)
 allow system_app sysfs_devices_system_cpu:file w_file_perms;
-
-# NetworkPingMonitor finds the game's sockets in /proc/net
-allow system_app proc_net_tcp_udp:file r_file_perms;
