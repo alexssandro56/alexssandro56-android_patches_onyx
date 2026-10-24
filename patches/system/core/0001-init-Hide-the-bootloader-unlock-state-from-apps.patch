@@ -1,0 +1,100 @@
+From cc163b21b7c450f2d24aff79c572c149679cc02b Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 10:50:42 +0000
+Subject: [PATCH] init: Hide the bootloader unlock state from apps
+
+Apps and Play Integrity read ro.boot.verifiedbootstate,
+ro.boot.flash.locked and related properties to tell an unlocked
+bootloader apart. Once the boot defaults are loaded, report a locked
+bootloader, green verified boot and release keys instead.
+
+Recovery and fastbootd keep the real values, so flashing still follows
+the actual lock state, and eng builds are left alone. ro.debuggable and
+the build type stay as they are, so adb root keeps working on userdebug.
+
+Based on the SafetyNet workaround by arter97 and others, as carried in
+AdarshGrewal/android_vendor_extra.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ init/property_service.cpp | 42 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 41 insertions(+), 1 deletion(-)
+
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index b70057f..f362d3b 100644
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -375,6 +375,9 @@ class PersistWriteThread {
+ 
+ [[clang::no_destroy]] static std::unique_ptr<PersistWriteThread> persist_write_thread;
+ 
++// Lets SetBootStateProps() override ro.* properties that are already set.
++static bool weaken_prop_override_security = false;
++
+ static std::optional<uint32_t> PropertySet(const std::string& name, const std::string& value,
+                                            SocketConnection* socket, std::string* error) {
+     size_t valuelen = value.size();
+@@ -397,7 +400,7 @@ static std::optional<uint32_t> PropertySet(const std::string& name, const std::s
+         prop_info* pi = (prop_info*)__system_property_find(name.c_str());
+         if (pi != nullptr) {
+             // ro.* properties are actually "write-once".
+-            if (StartsWith(name, "ro.")) {
++            if (StartsWith(name, "ro.") && !weaken_prop_override_security) {
+                 *error = "Read-only property was already set";
+                 return {PROP_ERROR_READ_ONLY_PROPERTY};
+             }
+@@ -1145,6 +1148,41 @@ static void property_initialize_ro_vendor_api_level() {
+     }
+ }
+ 
++// Report a locked bootloader, verified boot and release keys to apps that check
++// these properties. Recovery and fastbootd keep the real values, so flashing
++// still follows the actual lock state. ro.debuggable and the build type are left
++// alone, so adb root keeps working on userdebug builds.
++static void SetBootStateProps() {
++    if (IsRecoveryMode() || GetProperty("ro.build.type", "") == "eng") {
++        return;
++    }
++
++    static constexpr std::pair<const char*, const char*> kBootStateProps[] = {
++            {"ro.boot.vbmeta.device_state", "locked"},
++            {"ro.boot.verifiedbootstate", "green"},
++            {"ro.boot.flash.locked", "1"},
++            {"ro.boot.veritymode", "enforcing"},
++            {"ro.boot.warranty_bit", "0"},
++            {"ro.warranty_bit", "0"},
++            {"ro.vendor.boot.warranty_bit", "0"},
++            {"ro.vendor.warranty_bit", "0"},
++            {"ro.build.tags", "release-keys"},
++            {"ro.system.build.tags", "release-keys"},
++            {"vendor.boot.vbmeta.device_state", "locked"},
++            {"vendor.boot.verifiedbootstate", "green"},
++    };
++
++    LOG(INFO) << "Hiding the bootloader unlock state";
++    weaken_prop_override_security = true;
++    for (const auto& [name, value] : kBootStateProps) {
++        std::string error;
++        if (PropertySetNoSocket(name, value, &error) != PROP_SUCCESS) {
++            LOG(ERROR) << "Could not set '" << name << "' to '" << value << "': " << error;
++        }
++    }
++    weaken_prop_override_security = false;
++}
++
+ void PropertyLoadBootDefaults() {
+     // We read the properties and their values into a map, in order to always allow properties
+     // loaded in the later property files to override the properties in loaded in the earlier
+@@ -1246,6 +1284,8 @@ void PropertyLoadBootDefaults() {
+     property_initialize_ro_vendor_api_level();
+ 
+     update_sys_usb_config();
++
++    SetBootStateProps();
+ }
+ 
+ void PropertyLoadDerivedDefaults() {
+-- 
+2.43.0
+

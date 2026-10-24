@@ -23,6 +23,12 @@
              remote="onyx-extras-github"
              revision="main" />
 
+    <!-- Spoofify: build property spoofing settings, loonage / AdarshGrewal -->
+    <project path="packages/apps/Spoofify"
+             name="loonage/android_packages_apps_Spoofify"
+             remote="onyx-extras-github"
+             revision="seventeen" />
+
     <!-- Open-source replacement for mi_thermald -->
     <project path="external/mithermald"
              name="IRedDragonICY/mithermald"

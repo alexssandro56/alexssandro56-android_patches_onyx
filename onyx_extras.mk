@@ -25,3 +25,8 @@ PRODUCT_PACKAGES += \
 # mithermald (replaces the stock mi_thermald)
 PRODUCT_PACKAGES += \
     mi_thermal_engine
+
+# Spoofify: sets the build properties PropImitationHooks reports to Play
+# Services, see patches/frameworks/base/0005
+PRODUCT_PACKAGES += \
+    Spoofify

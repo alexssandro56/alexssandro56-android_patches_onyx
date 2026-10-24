@@ -5,6 +5,7 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 - **GameSpace**: painel de jogos do IRedDragonICY, com o suporte no framework escrito para o AOSPA.
 - **AFME**: geração de quadros na GPU do IRedDragonICY (layers EGL e Vulkan), ligada por jogo pelo GameSpace.
 - **mithermald**: daemon térmico open source (Rust) do IRedDragonICY, no lugar do `mi_thermald` da Xiaomi.
+- **Spoofing**: PropImitationHooks e o app Spoofify (AdarshGrewal/loonage), para o Play Integrity e o Google Fotos.
 
 ## Estrutura
 
@@ -15,6 +16,9 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 | `patches/frameworks/base/` | Suporte ao GameSpace no `system_server` e no SystemUI (serviço `game_space`, AFME, bypass de carregamento, serviço AxPlatform) |
 | `patches/frameworks/native/` | Carregadores EGL e Vulkan carregam os layers do AFME no jogo armado |
 | `patches/external/mithermald/` | Ajusta o mithermald ao `librustutils` do Android 17 (`rustutils::android::system_properties`) |
+| `patches/frameworks/base/0005` | PropImitationHooks: propriedades certificadas para o Play Services e a Play Store, e Pixel para o Google Fotos (sem keybox) |
+| `patches/system/core/` | O init informa bootloader travado, verified boot verde e release-keys para os apps (fora do recovery/fastbootd) |
+| `patches/packages/apps/Spoofify/` | Tira do Spoofify a keybox e a dependência da LineageOS |
 | `patches/packages/apps/GameSpace/` | Remove a dependência do SDK da LineageOS, que o AOSPA não tem |
 | `sdk/` | Módulos `ax_*` e as bibliotecas Compose pré-compiladas que o GameSpace usa |
 | `mithermald/sepolicy/` | Política SELinux do `mi_thermal_engine` (a ROM é enforcing) |
@@ -96,3 +100,19 @@ carregar com o aparelho quente e frio antes de distribuir.
 - AFME: [IRedDragonICY](https://github.com/IRedDragonICY/afme) (Apache 2.0)
 - Serviço AxPlatform do SystemUI: AxionOS, via crDroid (Apache 2.0)
 - mithermald: [IRedDragonICY](https://github.com/IRedDragonICY/mithermald) (GPL-2.0)
+
+## Spoofing
+
+Base: `AdarshGrewal/android_vendor_extra` (PropImitationHooks) e
+`loonage/android_packages_apps_Spoofify` (seventeen).
+
+- O app **Spoofify** (em Configurações > Apps, ou na gaveta) baixa ou importa um
+  JSON de propriedades (PIF) e grava em `Settings.Secure.certified_props_data`.
+- O framework aplica essas propriedades no Play Services (`.unstable`) e na Play
+  Store, e bloqueia o atestado de chave pedido pelo Play Integrity nesses
+  processos. O Google Fotos vê um Pixel (dá para desligar no app).
+- O init mostra bootloader travado e verified boot verde para os apps. Recovery e
+  fastbootd continuam vendo o estado real. `ro.debuggable` e o tipo de build não
+  mudam, então o `adb root` continua funcionando na userdebug.
+
+A parte de keybox do original não foi trazida.
