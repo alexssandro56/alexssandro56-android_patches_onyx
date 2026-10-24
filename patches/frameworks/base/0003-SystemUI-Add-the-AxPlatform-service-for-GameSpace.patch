@@ -24,13 +24,13 @@ Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
  packages/SystemUI/Android.bp                  |   1 +
  packages/SystemUI/AndroidManifest.xml         |   9 +
  .../systemui/ax/AxPlatformBinderService.kt    |  26 +
- .../ax/AxPlatformFeatureController.kt         | 444 ++++++++++
+ .../ax/AxPlatformFeatureController.kt         | 443 ++++++++++
  .../systemui/ax/AxPlatformFeatureMapper.kt    | 141 +++
  .../systemui/ax/AxPlatformObservers.kt        | 816 ++++++++++++++++++
  .../systemui/ax/AxPlatformServiceImpl.kt      | 122 +++
  .../systemui/ax/AxPlatformStateManager.kt     | 197 +++++
  .../dagger/SystemUICoreStartableModule.kt     |   7 +
- 9 files changed, 1763 insertions(+)
+ 9 files changed, 1762 insertions(+)
  create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformBinderService.kt
  create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt
  create mode 100644 packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureMapper.kt
@@ -107,7 +107,7 @@ new file mode 100644
 index 00000000..3919757a
 --- /dev/null
 +++ b/packages/SystemUI/src/com/android/systemui/ax/AxPlatformFeatureController.kt
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,443 @@
 +/*
 + * Copyright (C) 2025-2026 AxionOS
 + *
@@ -363,7 +363,6 @@ index 00000000..3919757a
 +            AxPlatformClient.FEATURE_SCREENSHOT -> {
 +                screenshotHandler.postDelayed({
 +                    screenshotHelper.takeScreenshot(
-+                        WindowManager.TAKE_SCREENSHOT_FULLSCREEN,
 +                        WindowManager.ScreenshotSource.SCREENSHOT_OTHER,
 +                        screenshotHandler,
 +                        null
