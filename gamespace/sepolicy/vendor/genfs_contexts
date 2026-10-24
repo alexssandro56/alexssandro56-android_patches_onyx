@@ -1,0 +1,1 @@
+genfscon sysfs /module/migt/parameters u:object_r:sysfs_migt:s0

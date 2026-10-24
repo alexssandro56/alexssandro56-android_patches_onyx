@@ -17,7 +17,7 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 | `patches/packages/apps/GameSpace/` | Remove a dependência do SDK da LineageOS, que o AOSPA não tem |
 | `sdk/` | Módulos `ax_*` e as bibliotecas Compose pré-compiladas que o GameSpace usa |
 | `mithermald/sepolicy/` | Política SELinux do `mi_thermal_engine` (a ROM é enforcing) |
-| `gamespace/sepolicy/` | Política SELinux do GameSpace: serviço `game_space` e as props `persist.sys.afme.*`, `persist.sys.mithermal.*` e `sys.gamespace.*` |
+| `gamespace/sepolicy/` | Política SELinux do GameSpace: serviço `game_space`, as props `persist.sys.afme.*`, `persist.sys.mithermal.*` e `sys.gamespace.*` e os nós do kernel que ele escreve (thermal_message, migt/metis, sched_boost, CPU, carga, disp_param) |
 | `gamespace/init/` | Liga e desliga o bypass de carregamento |
 | `onyx_extras.mk`, `BoardConfigExtras.mk` | O que o device tree inclui |
 | `device/` | Patch para o device tree incluir tudo isso e parar o `mi_thermald` stock |

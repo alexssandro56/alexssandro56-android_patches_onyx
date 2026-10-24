@@ -1,0 +1,22 @@
+# GameSpace (com.ireddragonicy.gamespace) runs as system_app and drives the
+# Xiaomi kernel modules directly, see ThermalNodes.kt
+
+# migt and metis frame boost
+allow system_app sysfs_migt:dir search;
+allow system_app sysfs_migt:file rw_file_perms;
+
+# WALT sched_boost
+allow system_app proc_walt:dir search;
+allow system_app proc_walt:file rw_file_perms;
+
+# Charging current limits and bypass charging (xm_power)
+allow system_app vendor_sysfs_xm_power:dir r_dir_perms;
+allow system_app vendor_sysfs_xm_power:file rw_file_perms;
+
+# HBM and DC dimming through disp_param
+allow system_app vendor_sysfs_displayfeature:dir search;
+allow system_app vendor_sysfs_displayfeature:file rw_file_perms;
+
+# GPU and battery readings for the monitor and diagnostics
+r_dir_file(system_app, vendor_sysfs_kgsl)
+r_dir_file(system_app, vendor_sysfs_battery_supply)
