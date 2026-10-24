@@ -17,6 +17,9 @@ allow system_app vendor_sysfs_xm_power:file rw_file_perms;
 allow system_app vendor_sysfs_displayfeature:dir search;
 allow system_app vendor_sysfs_displayfeature:file rw_file_perms;
 
-# GPU and battery readings for the monitor and diagnostics
+# PerfTuner sets the GPU clock range and governor; the monitor reads the load
 r_dir_file(system_app, vendor_sysfs_kgsl)
+allow system_app vendor_sysfs_kgsl:file w_file_perms;
+
+# Battery readings for the monitor and diagnostics
 r_dir_file(system_app, vendor_sysfs_battery_supply)

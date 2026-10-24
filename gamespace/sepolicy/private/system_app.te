@@ -10,6 +10,7 @@ set_prop(system_app, mithermal_prop)
 r_dir_file(system_app, sysfs_thermal)
 allow system_app sysfs_thermal:file w_file_perms;
 
-# PerfTuner raises the CPU floor; the monitor reads the current frequencies
+# PerfTuner sets the CPU frequency range and governor per game; the monitor
+# reads the current frequencies
 r_dir_file(system_app, sysfs_devices_system_cpu)
 allow system_app sysfs_devices_system_cpu:file w_file_perms;
