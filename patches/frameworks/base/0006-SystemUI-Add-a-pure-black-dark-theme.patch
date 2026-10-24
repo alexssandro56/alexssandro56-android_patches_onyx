@@ -101,8 +101,8 @@ index 626a60b..b6f745c 100644
          assignColorsToOverlay(mDynamicOverlay, DynamicColors.getCustomColorsMapped());
 +
 +        if (isPureBlackTheme()) {
-+            for (String color : PURE_BLACK_DARK_COLORS) {
-+                mDynamicOverlay.setResourceValue("android:color/system_" + color + "_dark",
++            for (String name : PURE_BLACK_DARK_COLORS) {
++                mDynamicOverlay.setResourceValue("android:color/system_" + name + "_dark",
 +                        TYPE_INT_COLOR_ARGB8, Color.BLACK, null);
 +            }
 +        }
