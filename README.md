@@ -20,6 +20,7 @@ Extras para o AOSPA (Android 17) no POCO F7 (`onyx`), mantidos fora do device tr
 | `patches/system/core/` | O init informa bootloader travado, verified boot verde e release-keys para os apps (fora do recovery/fastbootd) |
 | `patches/packages/apps/Spoofify/` | Tira do Spoofify a keybox e a dependência da LineageOS |
 | `patches/frameworks/base/0006`, `patches/packages/apps/Settings/` | Preto puro no tema escuro, com o botão em Configurações > Tela |
+| `patches/frameworks/base/0007` | Medidor de velocidade da Internet na barra de status (SystemUI) |
 | `patches/packages/apps/GameSpace/` | Remove a dependência do SDK da LineageOS, que o AOSPA não tem |
 | `sdk/` | Módulos `ax_*` e as bibliotecas Compose pré-compiladas que o GameSpace usa |
 | `mithermald/sepolicy/` | Política SELinux do `mi_thermal_engine` (a ROM é enforcing) |
@@ -126,3 +127,18 @@ preto o fundo e as superfícies mais baixas do Material You (background, surface
 surface_dim, surface_container_lowest e surface_container_low). Os containers mais
 altos mantêm o tom, então cartões, folhas e diálogos continuam se destacando.
 Muda na hora, sem reiniciar.
+
+## Medidor de velocidade da Internet
+
+Uma view no SystemUI mostra a velocidade de subida/descida ao lado do relógio.
+Ela soma o tráfego das redes ativas a cada dois segundos e acompanha a cor da
+barra de status. Lê as opções de `Settings.System`, sem depender do tuner do
+crDroid.
+
+Os interruptores ficam em Configurações > Tela, abaixo de Preto puro:
+- **Velocidade da Internet**: liga ou desliga.
+- **Mostrar em bytes**: B/s no lugar de bit/s.
+- **Ocultar quando parado**: some com pouco tráfego.
+- **Ocultar setas**: esconde as setas de direção.
+
+A direção padrão mostra a maior entre subida e descida.

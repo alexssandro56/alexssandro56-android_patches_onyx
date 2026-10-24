@@ -1,0 +1,144 @@
+From f8fab78fbc5b5e78688d24e33ab36f3f996c1b96 Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 13:31:14 +0000
+Subject: [PATCH] Settings: Add internet speed switches to Display
+
+Four switches under Display drive the network traffic indicator through
+Settings.System: the master Internet speed switch, plus bytes vs bits,
+hide when idle and hide arrows, which depend on it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ res/values-pt-rBR/onyx_strings.xml            |  8 ++++
+ res/values/onyx_strings.xml                   |  8 ++++
+ res/xml/display_settings.xml                  | 27 ++++++++++++
+ .../NetworkTrafficSettingController.java      | 44 +++++++++++++++++++
+ 4 files changed, 87 insertions(+)
+ create mode 100644 src/com/android/settings/display/NetworkTrafficSettingController.java
+
+diff --git a/res/values-pt-rBR/onyx_strings.xml b/res/values-pt-rBR/onyx_strings.xml
+index 4701491..70ae0c3 100644
+--- a/res/values-pt-rBR/onyx_strings.xml
++++ b/res/values-pt-rBR/onyx_strings.xml
+@@ -6,4 +6,12 @@
+ <resources>
+     <string name="pure_black_theme_title">Preto puro</string>
+     <string name="pure_black_theme_summary">Usar preto no lugar do cinza escuro nos fundos do tema escuro</string>
++    <string name="network_traffic_title">Velocidade da Internet</string>
++    <string name="network_traffic_summary">Mostrar a velocidade de subida/descida na barra de status</string>
++    <string name="network_traffic_units_title">Mostrar em bytes</string>
++    <string name="network_traffic_units_summary">Usar B/s em vez de bit/s</string>
++    <string name="network_traffic_autohide_title">Ocultar quando parado</string>
++    <string name="network_traffic_autohide_summary">Ocultar o medidor quando houver pouco tráfego</string>
++    <string name="network_traffic_hidearrow_title">Ocultar setas</string>
++    <string name="network_traffic_hidearrow_summary">Ocultar as setas de subida/descida</string>
+ </resources>
+diff --git a/res/values/onyx_strings.xml b/res/values/onyx_strings.xml
+index 1ec7413..c402b77 100644
+--- a/res/values/onyx_strings.xml
++++ b/res/values/onyx_strings.xml
+@@ -7,4 +7,12 @@
+     <!-- Display settings: pure black dark theme -->
+     <string name="pure_black_theme_title">Pure black</string>
+     <string name="pure_black_theme_summary">Use black instead of dark gray for backgrounds in dark theme</string>
++    <string name="network_traffic_title">Internet speed</string>
++    <string name="network_traffic_summary">Show the current up/download speed in the status bar</string>
++    <string name="network_traffic_units_title">Show in bytes</string>
++    <string name="network_traffic_units_summary">Use B/s instead of bit/s</string>
++    <string name="network_traffic_autohide_title">Hide when idle</string>
++    <string name="network_traffic_autohide_summary">Hide the indicator when there is little traffic</string>
++    <string name="network_traffic_hidearrow_title">Hide arrows</string>
++    <string name="network_traffic_hidearrow_summary">Hide the up/download direction arrows</string>
+ </resources>
+diff --git a/res/xml/display_settings.xml b/res/xml/display_settings.xml
+index dc749f8..dba8191 100644
+--- a/res/xml/display_settings.xml
++++ b/res/xml/display_settings.xml
+@@ -113,6 +113,33 @@
+             android:summary="@string/pure_black_theme_summary"
+             settings:controller="com.android.settings.display.PureBlackThemePreferenceController"/>
+ 
++        <SwitchPreferenceCompat
++            android:key="network_traffic_state"
++            android:title="@string/network_traffic_title"
++            android:summary="@string/network_traffic_summary"
++            settings:controller="com.android.settings.display.NetworkTrafficSettingController"/>
++
++        <SwitchPreferenceCompat
++            android:key="network_traffic_units"
++            android:title="@string/network_traffic_units_title"
++            android:summary="@string/network_traffic_units_summary"
++            android:dependency="network_traffic_state"
++            settings:controller="com.android.settings.display.NetworkTrafficSettingController"/>
++
++        <SwitchPreferenceCompat
++            android:key="network_traffic_autohide"
++            android:title="@string/network_traffic_autohide_title"
++            android:summary="@string/network_traffic_autohide_summary"
++            android:dependency="network_traffic_state"
++            settings:controller="com.android.settings.display.NetworkTrafficSettingController"/>
++
++        <SwitchPreferenceCompat
++            android:key="network_traffic_hidearrow"
++            android:title="@string/network_traffic_hidearrow_title"
++            android:summary="@string/network_traffic_hidearrow_summary"
++            android:dependency="network_traffic_state"
++            settings:controller="com.android.settings.display.NetworkTrafficSettingController"/>
++
+         <Preference
+             android:fragment="com.android.settings.accessibility.TextReadingPreferenceFragment"
+             android:key="text_reading_options"
+diff --git a/src/com/android/settings/display/NetworkTrafficSettingController.java b/src/com/android/settings/display/NetworkTrafficSettingController.java
+new file mode 100644
+index 0000000..528ecb7
+--- /dev/null
++++ b/src/com/android/settings/display/NetworkTrafficSettingController.java
+@@ -0,0 +1,44 @@
++/*
++ * SPDX-FileCopyrightText: 2026 alexssandro56
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package com.android.settings.display;
++
++import android.content.Context;
++import android.provider.Settings;
++
++import com.android.settings.R;
++import com.android.settings.core.TogglePreferenceController;
++
++/**
++ * Generic switch controller for the network traffic indicator. The preference key is used
++ * verbatim as the Settings.System key, so one controller drives every switch.
++ */
++public class NetworkTrafficSettingController extends TogglePreferenceController {
++
++    public NetworkTrafficSettingController(Context context, String key) {
++        super(context, key);
++    }
++
++    @Override
++    public int getAvailabilityStatus() {
++        return AVAILABLE;
++    }
++
++    @Override
++    public boolean isChecked() {
++        return Settings.System.getInt(mContext.getContentResolver(), getPreferenceKey(), 0) != 0;
++    }
++
++    @Override
++    public boolean setChecked(boolean isChecked) {
++        return Settings.System.putInt(mContext.getContentResolver(), getPreferenceKey(),
++                isChecked ? 1 : 0);
++    }
++
++    @Override
++    public int getSliceHighlightMenuRes() {
++        return R.string.menu_key_display;
++    }
++}
+-- 
+2.43.0
+
