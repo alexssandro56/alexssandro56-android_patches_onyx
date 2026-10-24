@@ -1,0 +1,105 @@
+From c2bdb030e28a54d0461e29216bbabb3d9fd6398c Mon Sep 17 00:00:00 2001
+From: Alex <05jeelo30@gmail.com>
+Date: Sat, 24 Oct 2026 01:45:44 +0000
+Subject: [PATCH] GameSpace: Build without the crDroid settings keys
+
+AOSPA's Settings doesn't define DISABLE_HW_OVERLAYS_APPS,
+STATUS_BAR_BRIGHTNESS_CONTROL or PULSE_BASS_HAPTICS, so kotlinc fails.
+Use the keys as local constants. Nothing in AOSPA reads them, so the
+GPU composition, status bar brightness and pulse haptics switches have
+no effect there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QY97AsgNLyAwQpzrsxC9zt
+---
+ .../gamespace/data/PerAppSettingStore.kt              |  8 +++++---
+ .../ireddragonicy/gamespace/data/SystemSettings.kt    | 11 +++++++----
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/com/ireddragonicy/gamespace/data/PerAppSettingStore.kt b/app/src/main/java/com/ireddragonicy/gamespace/data/PerAppSettingStore.kt
+index b254c9e..dc060a2 100644
+--- a/app/src/main/java/com/ireddragonicy/gamespace/data/PerAppSettingStore.kt
++++ b/app/src/main/java/com/ireddragonicy/gamespace/data/PerAppSettingStore.kt
+@@ -39,6 +39,8 @@ class PerAppSettingStore @Inject constructor(
+         const val KEY_COLOR_ENHANCE = "gamespace_color_enhance"
+         const val KEY_DISPLAY_STYLE = "gamespace_display_style"
+         const val KEY_GPU_MSAA = "gamespace_gpu_msaa"
++        // Settings.Secure.DISABLE_HW_OVERLAYS_APPS, which AOSPA doesn't define or act on
++        const val KEY_DISABLE_HW_OVERLAYS_APPS = "disable_hw_overlays_apps"
+         const val KEY_GPU_AF = "gamespace_gpu_af"
+         const val KEY_GPU_TEX_QUALITY = "gamespace_gpu_tex_quality"
+ 
+@@ -164,7 +166,7 @@ class PerAppSettingStore @Inject constructor(
+     fun gpuComposition(pkg: String): Boolean {
+         val current = Settings.Secure.getStringForUser(
+             context.contentResolver,
+-            Settings.Secure.DISABLE_HW_OVERLAYS_APPS,
++            KEY_DISABLE_HW_OVERLAYS_APPS,
+             UserHandle.USER_CURRENT
+         ).orEmpty()
+         return current.split(",").any { it == pkg }
+@@ -173,7 +175,7 @@ class PerAppSettingStore @Inject constructor(
+     fun setGpuComposition(pkg: String, enabled: Boolean) {
+         val current = Settings.Secure.getStringForUser(
+             context.contentResolver,
+-            Settings.Secure.DISABLE_HW_OVERLAYS_APPS,
++            KEY_DISABLE_HW_OVERLAYS_APPS,
+             UserHandle.USER_CURRENT
+         ).orEmpty()
+ 
+@@ -186,7 +188,7 @@ class PerAppSettingStore @Inject constructor(
+         runCatching {
+             Settings.Secure.putStringForUser(
+                 context.contentResolver,
+-                Settings.Secure.DISABLE_HW_OVERLAYS_APPS,
++                KEY_DISABLE_HW_OVERLAYS_APPS,
+                 set.joinToString(","),
+                 UserHandle.USER_CURRENT
+             )
+diff --git a/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt b/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
+index 8ca27aa..af8a8c9 100644
+--- a/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
++++ b/app/src/main/java/com/ireddragonicy/gamespace/data/SystemSettings.kt
+@@ -24,6 +24,9 @@ import android.provider.Settings
+ import com.ireddragonicy.gamespace.utils.GameModeUtils
+ import javax.inject.Inject
+ 
++// crDroid settings that AOSPA doesn't define; nothing acts on them there
++private const val KEY_STATUS_BAR_BRIGHTNESS_CONTROL = "status_bar_brightness_control"
++private const val KEY_PULSE_BASS_HAPTICS = "pulse_bass_haptics"
+ 
+ class SystemSettings @Inject constructor(
+     context: Context,
+@@ -67,12 +70,12 @@ class SystemSettings @Inject constructor(
+     var statusbarBrightness
+         get() =
+             Settings.System.getIntForUser(
+-                resolver, Settings.System.STATUS_BAR_BRIGHTNESS_CONTROL, 0,
++                resolver, KEY_STATUS_BAR_BRIGHTNESS_CONTROL, 0,
+                 UserHandle.USER_CURRENT
+             ) == 1
+         set(value) {
+             Settings.System.putIntForUser(
+-                resolver, Settings.System.STATUS_BAR_BRIGHTNESS_CONTROL,
++                resolver, KEY_STATUS_BAR_BRIGHTNESS_CONTROL,
+                 if (value) 1 else 0, UserHandle.USER_CURRENT
+             )
+         }
+@@ -150,12 +153,12 @@ class SystemSettings @Inject constructor(
+     var pulseBassHaptics
+         get() =
+             Settings.Secure.getIntForUser(
+-                resolver, Settings.Secure.PULSE_BASS_HAPTICS, 0,
++                resolver, KEY_PULSE_BASS_HAPTICS, 0,
+                 UserHandle.USER_CURRENT
+             )
+         set(value) {
+             Settings.Secure.putIntForUser(
+-                resolver, Settings.Secure.PULSE_BASS_HAPTICS,
++                resolver, KEY_PULSE_BASS_HAPTICS,
+                 value, UserHandle.USER_CURRENT
+             )
+         }
+-- 
+2.43.0
+
